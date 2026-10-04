@@ -1,0 +1,105 @@
+# Adaptive Epidemic Research Platform（AERP）
+
+流行病学研究原型，用于比较历史资料、接入地区级周监测版本、估计报告不完整程度、预测未来 1—4 周住院人数，并在识别数据/趋势变化后再更新候选模型。
+
+**研究问题：** 在监测数据修订或疫情趋势突然变化时，先识别变化类型再更新模型，是否比直接在线更新更可靠？
+
+> 这不是临床系统，也不是公共卫生决策指令。合成演示数据上的实验成功不代表现实世界有效。不要把预测范围称为大流行概率，不要把统计关联解释为因果证明。
+
+## 技术栈
+
+- 前端：React 18、TypeScript、Vite、Tailwind CSS、Apache ECharts
+- 后端：Python 3.11、FastAPI、Pydantic、SQLAlchemy、SQLite
+- 科学计算：pandas、NumPy（核心路径）；SciPy / scikit-learn / statsmodels 为可选对照依赖。计数回归使用纯 NumPy IRLS，以兼容部分 macOS 上无法加载的 SciPy 二进制轮子。
+
+## 快速启动（本地优先）
+
+依赖：Python 3.11、[uv](https://github.com/astral-sh/uv)、Node.js 20+。
+
+```bash
+# 1) 后端
+cd backend
+uv sync --extra dev
+cp ../.env.example ../.env   # 可选
+uv run uvicorn aerp.api.main:app --host 127.0.0.1 --port 8000
+
+# 2) 前端（新终端）
+cd frontend
+npm install
+npm run dev
+```
+
+打开 http://127.0.0.1:5173 。API 文档 http://127.0.0.1:8000/docs 。
+
+也可使用：
+
+```bash
+chmod +x scripts/dev.sh
+./scripts/dev.sh
+```
+
+可选 Docker（不是唯一方式）：
+
+```bash
+docker compose up --build
+```
+
+## 端到端演示
+
+启动后默认自动写入固定种子合成数据（`AERP_AUTO_SEED=true`）。
+
+1. 打开「总览」：查看合成演示横幅、地区趋势、数据可信程度。
+2. 「数据管理」：下载 CSV 模板，或点击重新生成合成数据。
+3. 「实验工作台」：创建并启动历史版本回放；或点「一键运行消融对照」比较删修订/删异常/删动态权重。
+4. 「预测比较」：查看历史预测与成熟实际值、最新预测范围、权重与 WIS/MAE。
+5. 「异常详情」：查看触发规则、支持/冲突证据，并更新人工核实状态。
+6. 「总览」可查看修订轨迹（同一周期不同发布时间）。
+7. 导出实验结果 JSON（含配置哈希、输入数据哈希、依赖版本）。
+
+命令行示例实验：
+
+```bash
+cd backend && uv run python ../scripts/run_demo_experiment.py
+# 输出 examples/sample_experiment.json
+```
+
+## 数据格式
+
+CSV 字段：`disease_id,region_id,period_start,period_end,issued_at,metric,value,unit,source_id,quality_flag`
+
+- `issued_at` 是该版本发布时间；同一周期可有多个版本。
+- `value` 为空且 `quality_flag=missing` 表示缺失，不会保存为 0。
+- 模板：`GET /api/data/template` 或 `backend/aerp/data/observation_template.csv`。
+
+外部连接器统一返回 `未配置` / `尚未验证` / `可用`，不会显示虚假连接成功。
+
+## 模型假设（摘要）
+
+详见 [docs/METHODS.md](docs/METHODS.md) 与 API `/api/models`。
+
+- 持续值：未来各周等于最近可见值。
+- 阻尼趋势：限制增长率并衰减外推。
+- 计数回归：泊松/负二项预测分布；固定系数臂只拟合一次。
+- 等权/动态组合：分位数平均，不是完整混合分布；动态权重只用已成熟结果。
+- 适应系统：先分类异常再调修订/窗口/权重；不默认优于等权。
+
+## 验证
+
+```bash
+# 后端测试
+cd backend && uv run pytest
+
+# 前端类型检查与构建
+cd frontend && npm run typecheck && npm run build
+```
+
+重点覆盖：截止时间不读未来版本、缺失不变 0、未成熟不更新权重、合成真值不进训练特征、WIS/覆盖率、分位数有序、小样本降级、组件失败不拖垮组合。
+
+## 文档
+
+- [方法说明](docs/METHODS.md)
+- [功能状态与局限](docs/STATUS.md)
+
+## 许可与伦理边界
+
+本仓库提供研究原型代码与合成演示数据。勿将未经验证输出用于临床或公共卫生决策。历史资料卡只引用公开概述来源；缺少可靠序列时使用“待补充”，不编造病例数与传播参数。

@@ -1,0 +1,7 @@
+disease_id,region_id,period_start,period_end,issued_at,metric,value,unit,source_id,quality_flag
+demo-ili,region-example,2024-01-01,2024-01-07,2024-01-08,hospital_admissions,12,count,manual,provisional
+demo-ili,region-example,2024-01-01,2024-01-07,2024-02-04,hospital_admissions,15,count,manual,complete
+demo-ili,region-example,2024-01-08,2024-01-14,2024-01-15,hospital_admissions,,count,manual,missing
+demo-ili,region-example,2024-01-08,2024-01-14,2024-01-15,reported_cases,40,count,manual,provisional
+demo-ili,region-example,2024-01-08,2024-01-14,2024-01-15,tests,800,count,manual,complete
+demo-ili,region-example,2024-01-08,2024-01-14,2024-01-15,positivity,0.05,proportion,manual,complete
