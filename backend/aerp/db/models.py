@@ -224,4 +224,5 @@ class Evaluation(Base):
     phase: Mapped[str] = mapped_column(String(32), default="unknown")
     arm: Mapped[str] = mapped_column(String(64), default="main")
     result_version: Mapped[str] = mapped_column(String(64), default="mature_lag")
+    purpose: Mapped[str] = mapped_column(String(32), default="final", index=True)
     notes: Mapped[str] = mapped_column(Text, default="")

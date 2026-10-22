@@ -8,6 +8,7 @@ import pandas as pd
 from aerp.core.analogs import apply_analog_to_decision
 from aerp.core.anomaly import AlertDraft
 from aerp.core.context import interval_scale_for_context
+from aerp.core.research_mode import analog_allowed_in_forecasts, context_interval_scale_allowed
 from aerp.core.models.base import PredictResult
 from aerp.core.models.damped import DampedTrendModel
 from aerp.core.scoring import score_forecast
@@ -46,12 +47,20 @@ def decide(alerts: list[AlertDraft], config: dict | None = None) -> AdaptationDe
             decision.downweight_models.extend(alert.affected_models)
             decision.notes.append("已成熟预测的误差持续恶化：降低对应模型权重。")
     analog_match = config.get("analog_match")
-    if analog_match:
+    if analog_match and analog_allowed_in_forecasts(config):
         apply_analog_to_decision(decision, analog_match)
-    context_scale, context_note = interval_scale_for_context(config.get("context"))
-    if context_note:
-        decision.interval_scale = max(float(decision.interval_scale), float(context_scale))
-        decision.notes.append(context_note)
+    elif analog_match and not analog_allowed_in_forecasts(config):
+        decision.notes.append("研究模式：教学用历史形态不进入正式适应规则。")
+    if context_interval_scale_allowed(config):
+        context_scale, context_note = interval_scale_for_context(config.get("context"))
+        if context_note:
+            decision.interval_scale = max(float(decision.interval_scale), float(context_scale))
+            decision.notes.append(context_note)
+    else:
+        decision.notes.append("研究模式：不按城市或医疗容量标签设置主观区间倍率。")
+    decision.notes.append(
+        "适应动作限于修订调整、短长窗口比较、候选权重、已记录的区间校准倍率和数据不足回退；不声称识别了传播机制。"
+    )
     return decision
 
 

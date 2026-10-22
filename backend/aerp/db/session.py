@@ -44,6 +44,7 @@ def init_db() -> None:
 
     Base.metadata.create_all(bind=engine)
     _ensure_region_context_column()
+    _ensure_sqlite_column("evaluations", "purpose", "VARCHAR(32) DEFAULT 'final'")
 
 
 def _ensure_region_context_column() -> None:
@@ -57,3 +58,16 @@ def _ensure_region_context_column() -> None:
         return
     with engine.begin() as connection:
         connection.execute(text("ALTER TABLE regions ADD COLUMN context_json JSON"))
+
+
+def _ensure_sqlite_column(table: str, column: str, ddl: str) -> None:
+    if not settings.database_url.startswith("sqlite"):
+        return
+    inspector = inspect(engine)
+    if table not in inspector.get_table_names():
+        return
+    columns = {item["name"] for item in inspector.get_columns(table)}
+    if column in columns:
+        return
+    with engine.begin() as connection:
+        connection.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}"))

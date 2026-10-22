@@ -166,7 +166,7 @@ def test_ablation_suite_compares_without_forced_winner(client: TestClient):
     result = body.get("result") or body
     assert body.get("status") in {"completed", "queued", "running"}
     if body.get("status") == "completed":
-        assert len(result["variants"]) == 6
+        assert len(result["variants"]) == 7
         assert "comparison" in result
         assert "不默认优于" in result["comparison"]["note"] or "真实回放" in result["comparison"]["note"]
         assert all(item["status"] in {"completed", "failed"} for item in result["variants"])

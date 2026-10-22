@@ -103,7 +103,11 @@ def apply_nowcast(frame: pd.DataFrame, cutoff, profile: dict, maturity_lag_days:
         age_days = int((pd.Timestamp(row["issued_at"]) - pd.Timestamp(row["period_end"])).days)
         weeks_from_end = int(round((pd.Timestamp(latest) - pd.Timestamp(row["period_end"])).days / 7.0))
         if age_days < maturity_lag_days and weeks_from_end < recent_weeks:
-            out.at[index, "value"] = max(0.0, float(row["value"]) * (1.0 + relative))
+            current = float(row["value"])
+            if current == 0:
+                out.at[index, "value"] = max(0.0, current + float(profile.get("median_delta") or 0.0))
+            else:
+                out.at[index, "value"] = max(0.0, current * (1.0 + relative))
     return out
 
 
@@ -120,3 +124,100 @@ def nowcast_interval(value: float, profile: dict) -> dict | None:
         "upper": upper,
         "note": "这是固定成熟滞后的估计区间，不等于最终真实值。",
     }
+
+
+def _revision_pairs(profile: dict) -> tuple[np.ndarray, np.ndarray]:
+    deltas = []
+    relatives = []
+    for path in profile.get("paths") or []:
+        points = [point for point in path.get("points") or [] if point.get("value") is not None]
+        if len(points) < 2:
+            continue
+        first = float(points[0]["value"])
+        last = float(points[-1]["value"])
+        deltas.append(last - first)
+        if first != 0:
+            relatives.append((last - first) / first)
+    return np.asarray(deltas, dtype=float), np.asarray(relatives, dtype=float)
+
+
+def sample_revised_frames(
+    frame: pd.DataFrame,
+    cutoff,
+    profile: dict,
+    *,
+    n_samples: int = 20,
+    seed: int = 42,
+    maturity_lag_days: int = 28,
+    recent_weeks: int = 4,
+) -> dict:
+    """从已成熟修订分布抽样近期未成熟周。初报为 0 时用加法，不用乘法。
+
+    假设：同一地区内各周独立抽样；地区之间独立。这是可复现近似，不是完整时空相关修订过程。
+    """
+    out_frame = frame.copy()
+    if not profile.get("estimable"):
+        return {
+            "status": "degraded",
+            "message": "修订分布不可估计，未进行抽样，保留点修订对照。",
+            "samples": [],
+            "n_samples": 0,
+            "seed": seed,
+            "assumptions": "样本不足时透明降级。",
+        }
+    deltas, relatives = _revision_pairs(profile)
+    if deltas.size < 8:
+        return {
+            "status": "degraded",
+            "message": "成熟修订对不足 8 个，未进行抽样。",
+            "samples": [],
+            "n_samples": 0,
+            "seed": seed,
+        }
+    rng = np.random.default_rng(int(seed))
+    work = out_frame.copy()
+    work["period_end"] = pd.to_datetime(work["period_end"])
+    work["issued_at"] = pd.to_datetime(work["issued_at"])
+    work["value"] = pd.to_numeric(work["value"], errors="coerce")
+    latest = work["period_end"].max()
+    immature = []
+    for index, row in work.iterrows():
+        if pd.isna(row["value"]):
+            continue
+        age_days = int((pd.Timestamp(row["issued_at"]) - pd.Timestamp(row["period_end"])).days)
+        weeks_from_end = int(round((pd.Timestamp(latest) - pd.Timestamp(row["period_end"])).days / 7.0))
+        if age_days < maturity_lag_days and weeks_from_end < recent_weeks:
+            immature.append(index)
+    samples = []
+    for _ in range(int(n_samples)):
+        drawn = work.copy()
+        for index in immature:
+            current = float(drawn.at[index, "value"])
+            if current == 0:
+                delta = float(rng.choice(deltas))
+                drawn.at[index, "value"] = max(0.0, current + delta)
+            else:
+                rel = float(rng.choice(relatives)) if relatives.size else 0.0
+                drawn.at[index, "value"] = max(0.0, current * (1.0 + rel))
+        samples.append(drawn)
+    return {
+        "status": "success",
+        "message": "已按已成熟修订对抽样近期未成熟周。正向和负向修订均可出现。",
+        "samples": samples,
+        "n_samples": len(samples),
+        "seed": seed,
+        "n_immature": len(immature),
+        "assumptions": "周与地区独立抽样；未建模共同修订冲击。覆盖修订不确定性，不覆盖全部参数与未来随机性。",
+        "point_revision_control": True,
+        "uncertainty_propagated": True,
+    }
+
+
+def mix_quantile_dicts(items: list[dict[float, float]]) -> dict[float, float]:
+    if not items:
+        return {}
+    levels = sorted(items[0])
+    mixed = {level: float(np.mean([item[level] for item in items])) for level in levels}
+    from aerp.core.quantiles import ordered_nonnegative
+
+    return ordered_nonnegative(mixed)

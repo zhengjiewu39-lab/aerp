@@ -5,6 +5,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from aerp.core.calendar import last_visible_week_end, weeks_between
 from aerp.core.models.base import FitResult, HorizonForecast, PredictResult, check_units, covariate_note
 from aerp.core.quantiles import QUANTILE_LEVELS, empirical_predictive_quantiles
 from aerp.core.series import finite_count, last_finite, prepare_weekly
@@ -35,6 +36,7 @@ class PersistenceModel:
 
     def __init__(self) -> None:
         self._values: np.ndarray | None = None
+        self._index: pd.DatetimeIndex | None = None
         self._errors: dict[int, np.ndarray] = {}
         self._fit: FitResult | None = None
         self._min_residuals = 8
@@ -46,7 +48,8 @@ class PersistenceModel:
         if unit_error:
             self._fit = FitResult("failed", unit_error)
             return self._fit
-        _index, values = prepare_weekly(training_data)
+        index, values = prepare_weekly(training_data)
+        self._index = index
         self._values = values
         minimum = int(config.get("min_obs", 12))
         self._min_residuals = int(config.get("min_residuals", 8))
@@ -74,7 +77,13 @@ class PersistenceModel:
             raise ValueError("没有可见值")
         return last[1]
 
-    def predict(self, horizons: list[int], available_covariates: dict | None = None) -> PredictResult:
+    def predict(
+        self,
+        horizons: list[int],
+        available_covariates: dict | None = None,
+        *,
+        target_week_ends: dict[int, pd.Timestamp] | None = None,
+    ) -> PredictResult:
         if self._fit is None or self._fit.status != "success" or self._values is None:
             message = self._fit.message if self._fit else "尚未拟合"
             status = self._fit.status if self._fit is not None else "failed"
@@ -82,8 +91,15 @@ class PersistenceModel:
         note = covariate_note(available_covariates)
         if self._trailing_gap:
             note += " 序列末端有缺失，沿用更早的可见值，缺失未记为 0。"
+        last_week = last_visible_week_end(self._index, self._values) if self._index is not None else None
         output: dict[int, HorizonForecast] = {}
         for horizon in horizons:
+            if target_week_ends is not None:
+                if last_week is None or int(horizon) not in target_week_ends:
+                    return PredictResult(self.model_id, "failed", "无法把持续值预测对齐到统一目标周。")
+                steps = weeks_between(last_week, target_week_ends[int(horizon)])
+                if steps < 1:
+                    return PredictResult(self.model_id, "failed", "目标周不晚于最后可见周，拒绝改贴日期。")
             point = self._point(self._values, horizon)
             quantiles, method = self._quantiles_for(point, int(horizon), horizons)
             if quantiles is None:

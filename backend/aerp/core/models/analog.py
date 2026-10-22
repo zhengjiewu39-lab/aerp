@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 
 from aerp.core.analogs import ANALOG_DISCLAIMER, analog_blend_weight, match_values
+from aerp.core.calendar import last_visible_week_end, weeks_between
 from aerp.core.models.base import FitResult, HorizonForecast, PredictResult, check_units, covariate_note
 from aerp.core.models.persistence import rolling_errors
 from aerp.core.quantiles import QUANTILE_LEVELS, empirical_predictive_quantiles
@@ -19,6 +20,7 @@ class AnalogShapeModel:
 
     def __init__(self) -> None:
         self._values: np.ndarray | None = None
+        self._index: pd.DatetimeIndex | None = None
         self._errors: dict[int, np.ndarray] = {}
         self._fit: FitResult | None = None
         self._match: dict[str, Any] | None = None
@@ -33,7 +35,8 @@ class AnalogShapeModel:
         if unit_error:
             self._fit = FitResult("failed", unit_error)
             return self._fit
-        _index, values = prepare_weekly(training_data)
+        index, values = prepare_weekly(training_data)
+        self._index = index
         self._values = values
         self._context = config.get("context")
         self._peers = config.get("peers") or {}
@@ -87,16 +90,30 @@ class AnalogShapeModel:
         index = min(len(continuation) - 1, max(0, int(horizon) - 1))
         return float(continuation[index])
 
-    def predict(self, horizons: list[int], available_covariates: dict | None = None) -> PredictResult:
+    def predict(
+        self,
+        horizons: list[int],
+        available_covariates: dict | None = None,
+        *,
+        target_week_ends: dict[int, pd.Timestamp] | None = None,
+    ) -> PredictResult:
         if self._fit is None or self._fit.status != "success" or self._values is None:
             message = self._fit.message if self._fit else "尚未拟合"
             status = self._fit.status if self._fit is not None else "failed"
             return PredictResult(self.model_id, status, message, metadata=self.serialize_metadata())
         note = covariate_note(available_covariates) + " " + ANALOG_DISCLAIMER
         top = (self._match or {}).get("top") or {}
+        last_week = last_visible_week_end(self._index, self._values) if self._index is not None else None
         output: dict[int, HorizonForecast] = {}
         for horizon in horizons:
-            point = self._point(self._values, int(horizon))
+            steps = int(horizon)
+            if target_week_ends is not None:
+                if last_week is None or int(horizon) not in target_week_ends:
+                    return PredictResult(self.model_id, "failed", "无法把形态类比对齐到统一目标周。", metadata=self.serialize_metadata())
+                steps = weeks_between(last_week, target_week_ends[int(horizon)])
+                if steps < 1:
+                    return PredictResult(self.model_id, "failed", "目标周不晚于最后可见周，拒绝改贴日期。", metadata=self.serialize_metadata())
+            point = self._point(self._values, int(steps))
             quantiles, method = self._quantiles_for(point, int(horizon))
             if quantiles is None:
                 return PredictResult(self.model_id, "degraded", "无法为全部预测时长构建形态外推区间。", metadata=self.serialize_metadata())

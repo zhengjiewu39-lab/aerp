@@ -2,9 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
+import sys
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
+
+from aerp.config import ROOT
 
 
 def sha256_text(text: str) -> str:
@@ -41,3 +46,22 @@ def hash_observations(frame: pd.DataFrame) -> str:
             slim[col] = pd.to_datetime(slim[col]).dt.strftime("%Y-%m-%dT%H:%M:%S")
     slim = slim.sort_values(list(slim.columns)).reset_index(drop=True)
     return sha256_text(slim.to_json(orient="records", date_format="iso"))
+
+
+def git_commit_hash(cwd: Path | None = None) -> str:
+    root = cwd or ROOT
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=root,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return result.stdout.strip() or "unknown"
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+
+
+def python_runtime() -> dict[str, str]:
+    return {"python": sys.version.split()[0], "executable": sys.executable}

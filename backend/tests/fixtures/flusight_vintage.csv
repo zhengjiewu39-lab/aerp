@@ -1,0 +1,6 @@
+as_of,target,target_end_date,location,location_name,observation,weekly_rate
+2023-10-11,wk inc flu hosp,2023-10-07,01,Alabama,8,0.16
+2023-10-18,wk inc flu hosp,2023-10-07,01,Alabama,10,0.2
+2023-10-18,wk inc flu hosp,2023-10-14,01,Alabama,11,0.22
+2023-10-25,wk inc flu hosp,2023-10-14,01,Alabama,12,0.24
+2023-10-25,wk inc flu hosp,2023-10-21,01,Alabama,16,0.32

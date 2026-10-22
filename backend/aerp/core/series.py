@@ -4,19 +4,38 @@ import numpy as np
 import pandas as pd
 
 
-def prepare_weekly(frame: pd.DataFrame) -> tuple[pd.DatetimeIndex, np.ndarray]:
-    """整理单指标周序列。缺失保持为 NaN，不用 0 填补。"""
+def prepare_weekly(frame: pd.DataFrame, index: pd.DatetimeIndex | None = None) -> tuple[pd.DatetimeIndex, np.ndarray]:
+    """整理单指标周序列。缺失保持为 NaN，不用 0 填补。
+
+    若提供统一日历 index，则按该坐标对齐，不把各地区自己的序列长度当作共同时间。
+    """
     if frame is None or frame.empty:
-        return pd.DatetimeIndex([]), np.array([], dtype=float)
+        empty = index if index is not None else pd.DatetimeIndex([])
+        return empty, np.full(len(empty), np.nan, dtype=float)
     work = frame.copy()
     work["period_end"] = pd.to_datetime(work["period_end"])
     work["value"] = pd.to_numeric(work["value"], errors="coerce")
     work = work.sort_values("period_end").drop_duplicates("period_end", keep="last")
-    start = work["period_end"].min()
-    end = work["period_end"].max()
-    index = pd.date_range(start, end, freq="7D")
+    if index is None:
+        start = work["period_end"].min()
+        end = work["period_end"].max()
+        index = pd.date_range(start, end, freq="7D")
     series = work.set_index("period_end")["value"].reindex(index)
-    return index, series.to_numpy(dtype=float)
+    return pd.DatetimeIndex(index), series.to_numpy(dtype=float)
+
+
+def shared_weekly_index(frames: list[pd.DataFrame]) -> pd.DatetimeIndex:
+    ends = []
+    for frame in frames:
+        if frame is None or frame.empty or "period_end" not in frame.columns:
+            continue
+        ends.append(pd.to_datetime(frame["period_end"]))
+    if not ends:
+        return pd.DatetimeIndex([])
+    combined = pd.concat(ends, ignore_index=True).dropna()
+    if combined.empty:
+        return pd.DatetimeIndex([])
+    return pd.date_range(combined.min(), combined.max(), freq="7D")
 
 
 def finite_count(values: np.ndarray) -> int:

@@ -55,6 +55,17 @@ def covariate_note(available_covariates: dict | None) -> str:
     return "未使用未来辅助变量观测；季节项由日历确定。"
 
 
+def clone_prediction(result: PredictResult | None) -> PredictResult | None:
+    """复制预测对象，避免适应规则改写对照臂的分位数。"""
+    if result is None:
+        return None
+    horizons = {
+        horizon: HorizonForecast(item.horizon, dict(item.quantiles), item.method, item.quality_note)
+        for horizon, item in (result.horizons or {}).items()
+    }
+    return PredictResult(result.model_id, result.status, result.message, horizons, dict(result.metadata or {}))
+
+
 def check_units(training_data: pd.DataFrame) -> str | None:
     if training_data is None or "unit" not in training_data.columns:
         return None

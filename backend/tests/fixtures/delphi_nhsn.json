@@ -1,0 +1,24 @@
+{
+  "result": 1,
+  "message": ["success"],
+  "epidata": [
+    {
+      "geo_value": "pa",
+      "signal": "confirmed_admissions_flu_ew",
+      "time_value": 20240106,
+      "issue": 20240110,
+      "value": 42.0,
+      "stderr": null,
+      "sample_size": null
+    },
+    {
+      "geo_value": "pa",
+      "signal": "confirmed_admissions_flu_ew",
+      "time_value": 20240113,
+      "issue": 20240117,
+      "value": 55.0,
+      "stderr": null,
+      "sample_size": null
+    }
+  ]
+}

@@ -86,6 +86,26 @@ CSV 字段：`disease_id,region_id,period_start,period_end,issued_at,metric,valu
 - 地区分层：统一 GLM、独立 GLM、部分共享分层、分层动态更新对照；年龄结构只作地区协变量。
 - 动态更新只调整地区截距和短期斜率，不把住院趋势改名为传播率。
 
+## 研究模式（论文回放）
+
+```bash
+cd backend
+uv run python -m aerp.research fetch --kind vintage
+uv run python -m aerp.research inventory --kind vintage
+uv run python -m aerp.research splits --kind vintage
+uv run python -m aerp.research replay --kind vintage --run-experiment --seed 42
+uv run python -m aerp.research verify-delphi
+uv run python -m aerp.research archive-verify
+```
+
+- snapshot 没有真实 `as_of`，只能做最终数据时间切分。
+- vintage 使用 FluSight `time-series.csv` 的 `as_of`；2025-07-05 前若为周六则按 reference_date 转为周三发布日，不能用下载时间冒充发布时间。
+- 外部 FluSight 提交只作对照，不并入本系统模型臂。
+- 本地前瞻归档与哈希链不能证明独立公开发布。
+- 没有真实变化类型标签时不报告变化诊断准确率。
+- 研究方案、数据字典、EPIFORGE 映射见 `docs/RESEARCH_PROTOCOL.md`、`docs/DATA_DICTIONARY.md`、`docs/EPIFORGE.md`、`docs/EXTERNAL_TIMESTAMP.md`。
+- 产物写到 `research_runs/`，不覆盖原始数据。实验未完成时标记 incomplete，不写虚构成绩。
+
 ## 验证
 
 ```bash

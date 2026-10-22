@@ -5,6 +5,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from aerp.core.calendar import last_visible_week_end, weeks_between
 from aerp.core.models.base import FitResult, HorizonForecast, PredictResult, check_units, covariate_note
 from aerp.core.models.persistence import rolling_errors
 from aerp.core.quantiles import QUANTILE_LEVELS, empirical_predictive_quantiles
@@ -38,6 +39,7 @@ class DampedTrendModel:
 
     def __init__(self) -> None:
         self._values: np.ndarray | None = None
+        self._index: pd.DatetimeIndex | None = None
         self._errors: dict[int, np.ndarray] = {}
         self._fit: FitResult | None = None
         self._min_residuals = 8
@@ -50,7 +52,8 @@ class DampedTrendModel:
         if unit_error:
             self._fit = FitResult("failed", unit_error)
             return self._fit
-        _index, values = prepare_weekly(training_data)
+        index, values = prepare_weekly(training_data)
+        self._index = index
         self._values = values
         self.phi = float(config.get("phi", 0.75))
         self.growth_cap = float(config.get("growth_cap", 0.35))
@@ -81,15 +84,29 @@ class DampedTrendModel:
     def _point(self, history: np.ndarray, horizon: int) -> float:
         return damped_point(history, horizon, self.phi, self.growth_cap)
 
-    def predict(self, horizons: list[int], available_covariates: dict | None = None) -> PredictResult:
+    def predict(
+        self,
+        horizons: list[int],
+        available_covariates: dict | None = None,
+        *,
+        target_week_ends: dict[int, pd.Timestamp] | None = None,
+    ) -> PredictResult:
         if self._fit is None or self._fit.status != "success" or self._values is None:
             message = self._fit.message if self._fit else "尚未拟合"
             status = self._fit.status if self._fit is not None else "failed"
             return PredictResult(self.model_id, status, message)
         note = covariate_note(available_covariates)
+        last_week = last_visible_week_end(self._index, self._values) if self._index is not None else None
         output: dict[int, HorizonForecast] = {}
         for horizon in horizons:
-            point = self._point(self._values, int(horizon))
+            steps = int(horizon)
+            if target_week_ends is not None:
+                if last_week is None or int(horizon) not in target_week_ends:
+                    return PredictResult(self.model_id, "failed", "无法把阻尼趋势对齐到统一目标周。")
+                steps = weeks_between(last_week, target_week_ends[int(horizon)])
+                if steps < 1:
+                    return PredictResult(self.model_id, "failed", "目标周不晚于最后可见周，拒绝改贴日期。")
+            point = self._point(self._values, int(steps))
             errors = self._errors.get(int(horizon), np.array([]))
             method = "empirical_residual_quantiles"
             if errors.size < self._min_residuals:

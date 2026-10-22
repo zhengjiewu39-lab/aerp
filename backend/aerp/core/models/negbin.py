@@ -6,6 +6,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from aerp.core.calendar import last_visible_week_end, weeks_between
 from aerp.core.models.base import FitResult, HorizonForecast, PredictResult, check_units, covariate_note
 from aerp.core.quantiles import QUANTILE_LEVELS, ordered_nonnegative
 from aerp.core.series import finite_count, prepare_weekly
@@ -84,16 +85,34 @@ def _design(time_index: np.ndarray, dates: pd.DatetimeIndex, scale: float) -> np
     )
 
 
-def _fit_poisson_irls(design: np.ndarray, y: np.ndarray, max_iter: int = 80) -> tuple[np.ndarray, np.ndarray]:
-    """泊松对数链接 IRLS。不依赖 statsmodels / sklearn。"""
+def _fit_poisson_irls(
+    design: np.ndarray, y: np.ndarray, max_iter: int = 80, *, offset: np.ndarray | None = None
+) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+    """泊松对数链接 IRLS。offset 加在线性预测上。不依赖 statsmodels / sklearn。"""
+    if design.ndim != 2 or design.shape[0] != len(y):
+        raise RuntimeError("泊松 IRLS 设计矩阵形状不匹配")
+    keep = [0] if design.shape[1] else []
+    for column in range(1, design.shape[1]):
+        trial = design[:, keep + [column]]
+        if int(np.linalg.matrix_rank(trial, tol=1e-6)) > len(keep):
+            keep.append(column)
+    dropped = [index for index in range(design.shape[1]) if index not in keep]
+    design = design[:, keep]
+    rank = int(np.linalg.matrix_rank(design, tol=1e-8))
+    if design.shape[1] == 0 or rank == 0:
+        raise RuntimeError("设计矩阵秩为 0，无法拟合")
+    off = np.zeros(len(y), dtype=float) if offset is None else np.asarray(offset, dtype=float)
     coef = np.zeros(design.shape[1], dtype=float)
-    coef[0] = math.log(max(float(np.mean(y)), 1e-3))
-    for _ in range(max_iter):
-        eta = design @ coef
-        mu = np.exp(np.clip(eta, -20, 20))
-        weight = mu
+    coef[0] = math.log(max(float(np.mean(y)), 1e-3)) - float(np.mean(off))
+    converged = False
+    iterations = 0
+    for iterations in range(1, max_iter + 1):
+        with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+            eta_raw = design @ coef + off
+        eta = np.clip(np.nan_to_num(eta_raw, nan=0.0, posinf=20.0, neginf=-20.0), -20, 20)
+        mu = np.exp(eta)
         z = eta + (y - mu) / np.maximum(mu, 1e-6)
-        sw = np.sqrt(np.maximum(weight, 1e-8))
+        sw = np.sqrt(np.maximum(mu, 1e-8))
         xw = design * sw[:, None]
         yw = z * sw
         try:
@@ -102,12 +121,27 @@ def _fit_poisson_irls(design: np.ndarray, y: np.ndarray, max_iter: int = 80) -> 
             raise RuntimeError(f"泊松 IRLS 失败：{exc}") from exc
         if not np.all(np.isfinite(coef_new)):
             raise RuntimeError("泊松 IRLS 产生非有限系数")
-        if float(np.max(np.abs(coef_new - coef))) < 1e-6:
-            coef = coef_new
+        coef_new = np.clip(coef_new, -12, 12)
+        mixed = np.clip(coef + 0.5 * (coef_new - coef), -12, 12)
+        delta = float(np.max(np.abs(mixed - coef)))
+        coef = mixed
+        if delta < 1e-5:
+            converged = True
             break
-        coef = coef_new
-    mu = np.exp(np.clip(design @ coef, -20, 20))
-    return np.clip(mu, 1e-6, 1e6), coef
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        eta_final = design @ coef + off
+    mu = np.exp(np.clip(np.nan_to_num(eta_final, nan=0.0, posinf=20.0, neginf=-20.0), -20, 20))
+    info = {
+        "converged": converged,
+        "iterations": iterations,
+        "rank": rank,
+        "n_params": int(design.shape[1]),
+        "dropped_columns": dropped,
+        "kept_columns": keep,
+    }
+    if not converged:
+        info["message"] = f"泊松 IRLS 在 {max_iter} 次迭代后未达到 1e-6 容差"
+    return np.clip(mu, 1e-6, 1e6), coef, info
 
 
 class NegBinGLMModel:
@@ -124,6 +158,10 @@ class NegBinGLMModel:
         self._index: pd.DatetimeIndex | None = None
         self._engine = ""
         self._method = ""
+        self._origin_date: pd.Timestamp | None = None
+        self._last_week: pd.Timestamp | None = None
+        self._fit_info: dict[str, Any] = {}
+        self._keep: list[int] | None = None
 
     def fit(self, training_data: pd.DataFrame, config: dict | None = None) -> FitResult:
         config = config or {}
@@ -146,23 +184,38 @@ class NegBinGLMModel:
         if np.any(y < 0):
             self._fit = FitResult("failed", "计数模型遇到负值，未把负值改成 0 后假装拟合成功。")
             return self._fit
-        self._scale = float(max(finite.max(), 1))
         dates = pd.DatetimeIndex(index[finite])
-        design = _design(finite.astype(float), dates, self._scale)
+        self._origin_date = pd.Timestamp(index[0])
+        self._last_week = last_visible_week_end(index, values)
+        time_index = np.array([(pd.Timestamp(item) - self._origin_date).days / 7.0 for item in dates], dtype=float)
+        self._scale = float(max(float(np.max(time_index)), 1.0))
+        design = _design(time_index, dates, self._scale)
         try:
-            mu, coef = _fit_poisson_irls(design, y)
+            mu, coef, info = _fit_poisson_irls(design, y)
         except Exception as exc:  # noqa: BLE001
             self._fit = FitResult("failed", f"计数回归未能收敛：{exc}")
             return self._fit
         self._coef = coef
         self._engine = "numpy_poisson_irls"
+        self._fit_info = info
+        self._keep = list(info.get("kept_columns") or range(len(coef)))
         alpha = self._moment_alpha(y, mu)
         self._alpha = alpha
         self._method = "negative_binomial_predictive_distribution" if alpha >= 1e-6 else "poisson_predictive_distribution"
+        metadata = {
+            "n_obs": observed,
+            "alpha": alpha,
+            "engine": self._engine,
+            "interval_method": self._method,
+            **info,
+        }
+        if not info.get("converged"):
+            self._fit = FitResult("degraded", info.get("message") or "计数回归未收敛。", metadata)
+            return self._fit
         self._fit = FitResult(
             "success",
             "已拟合计数回归。该模型不识别传播参数。",
-            {"n_obs": observed, "alpha": alpha, "engine": self._engine, "interval_method": self._method},
+            metadata,
         )
         return self._fit
 
@@ -180,24 +233,36 @@ class NegBinGLMModel:
         available_covariates: dict | None = None,
         *,
         anchor=None,
+        target_week_ends: dict[int, pd.Timestamp] | None = None,
     ) -> PredictResult:
         if self._fit is None or self._fit.status != "success" or self._coef is None or self._index is None:
             message = self._fit.message if self._fit else "尚未拟合"
             status = "degraded" if self._fit and self._fit.status == "degraded" else "failed"
             return PredictResult(self.model_id, status, message)
         note = covariate_note(available_covariates)
-        anchor_ts = pd.Timestamp(self._index[-1] if anchor is None else anchor)
-        step = int(round((anchor_ts - pd.Timestamp(self._index[-1])).days / 7.0))
+        if self._origin_date is None:
+            self._origin_date = pd.Timestamp(self._index[0])
+        last_week = self._last_week or pd.Timestamp(self._index[-1] if anchor is None else anchor)
         output: dict[int, HorizonForecast] = {}
         for horizon in horizons:
-            future_index = (len(self._index) - 1) + step + int(horizon)
-            future_date = pd.Timestamp(self._index[-1]) + pd.Timedelta(days=7 * (step + int(horizon)))
-            row = _design(np.array([future_index], dtype=float), pd.DatetimeIndex([future_date]), self._scale)[0]
+            if target_week_ends is not None:
+                if int(horizon) not in target_week_ends:
+                    return PredictResult(self.model_id, "failed", "目标周字典缺少对应预测时长。")
+                future_date = pd.Timestamp(target_week_ends[int(horizon)])
+                if weeks_between(last_week, future_date) < 1:
+                    return PredictResult(self.model_id, "failed", "目标周不晚于最后可见周，拒绝改贴日期。")
+            else:
+                anchor_ts = pd.Timestamp(last_week if anchor is None else anchor)
+                future_date = anchor_ts + pd.Timedelta(days=7 * int(horizon))
+            time_index = np.array([(future_date - self._origin_date).days / 7.0], dtype=float)
+            row = _design(time_index, pd.DatetimeIndex([future_date]), self._scale)[0]
+            if self._keep is not None and row.size > max(self._keep):
+                row = row[self._keep]
             mean = float(np.exp(np.clip(np.dot(row, self._coef), -20, 20)))
             quantiles, method = predictive_quantiles(mean, self._alpha)
             output[int(horizon)] = HorizonForecast(int(horizon), quantiles, method, note)
         metadata = self.serialize_metadata()
-        metadata["anchor_step_weeks"] = step
+        metadata["origin_date"] = None if self._origin_date is None else self._origin_date.date().isoformat()
         return PredictResult(self.model_id, "success", self._fit.message, output, metadata)
 
     def diagnostics(self) -> dict[str, Any]:

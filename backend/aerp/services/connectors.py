@@ -16,16 +16,21 @@ CONNECTORS = [
     {
         "id": "delphi_epidata",
         "name": "Delphi Epidata",
-        "status": "unconfigured",
+        "status": "unverified",
         "url": "https://github.com/cmu-delphi/delphi-epidata",
-        "note": "尚未验证。接入前需核查许可、覆盖范围、发布时间与运行条件。",
+        "note": "默认尚未验证。运行 python -m aerp.research verify-delphi 后，仅当探测路径真正返回数据才改为可用。",
     },
     {
         "id": "flusight",
         "name": "FluSight Forecast Hub",
-        "status": "unverified",
+        "status": "available",
         "url": "https://github.com/cdcepi/FluSight-forecast-hub",
-        "note": "尚未验证。不可默认与其他资源无条件混用。",
+        "note": (
+            "snapshot 没有 as_of，只能做最终数据时间切分。"
+            "vintage 使用 time-series.csv 的 as_of，并按 2025-07-05 前后语义转换发布日。"
+            "外部 FluSight 提交可在许可允许时作为对照，不并入本系统模型臂。"
+            "下载失败时返回明确错误，不伪造成功。"
+        ),
     },
     {
         "id": "epinowcast",
@@ -58,9 +63,13 @@ STATUS_LABELS = {
 
 
 def list_connectors() -> list[dict]:
+    from aerp.services.delphi import connector_status as delphi_status
+
     items = []
     for item in CONNECTORS:
         row = dict(item)
+        if row["id"] == "delphi_epidata":
+            row.update(delphi_status())
         row["status_label"] = STATUS_LABELS.get(row["status"], row["status"])
         items.append(row)
     return items

@@ -5,12 +5,14 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from aerp.core.calendar import weeks_between
 from aerp.core.models.base import FitResult, HorizonForecast, PredictResult, covariate_note
-from aerp.core.models.negbin import _design, predictive_quantiles
-from aerp.core.series import last_finite, prepare_weekly
+from aerp.core.models.negbin import _design, _fit_poisson_irls, predictive_quantiles
+from aerp.core.series import last_finite, prepare_weekly, shared_weekly_index
 
 IDENTIFIABILITY_NOTE = (
-    "分层计数模型只共享季节与趋势，并对地区截距做经验贝叶斯收缩。"
+    "这是按地区残差均值做经验贝叶斯式收缩的近似分层，不是完整贝叶斯分层模型，也没有 MCMC 后验。"
+    "共享季节与趋势后，地区截距按 residual shrinkage 向总体收缩。"
     "动态更新仅调整地区截距和一条受阻尼的短期斜率，不同时自由更新传播率、报告率和易感比例。"
     "疫苗覆盖率不视为免疫人口比例。地区效应不是已证明的生物学差异。"
     "仅有年龄人口比例、没有分年龄住院时，年龄结构只作地区协变量，不识别年龄组间传播。"
@@ -51,28 +53,8 @@ def _center(values: list[float]) -> tuple[np.ndarray, float]:
     return filled - mean, mean
 
 
-def _irls(design: np.ndarray, y: np.ndarray, offset: np.ndarray, max_iter: int = 80) -> tuple[np.ndarray, np.ndarray]:
-    coef = np.zeros(design.shape[1], dtype=float)
-    coef[0] = float(np.log(max(float(np.mean(y)), 1e-3))) - float(np.mean(offset))
-    for _ in range(max_iter):
-        with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
-            eta = np.clip(design @ np.clip(coef, -12, 12) + offset, -20, 20)
-        mu = np.exp(eta)
-        z = eta + (y - mu) / np.maximum(mu, 1e-6)
-        sw = np.sqrt(np.maximum(mu, 1e-8))
-        xw = design * sw[:, None]
-        yw = z * sw
-        coef_new, *_ = np.linalg.lstsq(xw, yw, rcond=None)
-        if not np.all(np.isfinite(coef_new)):
-            raise RuntimeError("分层泊松 IRLS 产生非有限系数")
-        coef_new = np.clip(coef_new, -12, 12)
-        if float(np.max(np.abs(coef_new - coef))) < 1e-6:
-            coef = coef_new
-            break
-        coef = coef_new
-    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
-        mu = np.exp(np.clip(design @ coef + offset, -20, 20))
-    return np.clip(mu, 1e-6, 1e6), coef
+def _irls(design: np.ndarray, y: np.ndarray, offset: np.ndarray, max_iter: int = 80) -> tuple[np.ndarray, np.ndarray, dict]:
+    return _fit_poisson_irls(design, y, max_iter=max_iter, offset=offset)
 
 
 def _moment_alpha(y: np.ndarray, mu: np.ndarray) -> float:
@@ -109,6 +91,9 @@ class PanelCountModel:
         self._mode = "hierarchical"
         self._window_choice = "expanding"
         self._update: dict[str, Any] = {}
+        self._calendar_start: pd.Timestamp | None = None
+        self._fit_info: dict[str, Any] = {}
+        self._keep: list[int] | None = None
 
     def fit(
         self,
@@ -126,13 +111,8 @@ class PanelCountModel:
         rolling = int(config.get("rolling_window_weeks") or 0)
         use_slope = bool(config.get("dynamic_slope", self._mode == "hierarchical_dynamic"))
         train_ids = [region_id for region_id in panels if region_id not in self._holdout]
-        rows_y = []
-        rows_t = []
-        rows_dates = []
-        rows_offset = []
-        rows_region = []
-        rows_cov = {key: [] for key in COVARIATE_KEYS}
-        used_features = []
+        calendar_frames = []
+        prepared: dict[str, tuple[pd.DatetimeIndex, np.ndarray, pd.DataFrame]] = {}
         for region_id in train_ids:
             frame = panels[region_id]
             if rolling:
@@ -141,7 +121,23 @@ class PanelCountModel:
                 last = work["period_end"].max()
                 start = last - pd.Timedelta(days=7 * (rolling - 1))
                 frame = work.loc[work["period_end"] >= start]
-            index, values = prepare_weekly(frame)
+            calendar_frames.append(frame)
+            prepared[region_id] = (None, None, frame)  # type: ignore[assignment]
+        shared_index = shared_weekly_index(calendar_frames)
+        if len(shared_index) == 0:
+            self._fit = FitResult("degraded", "分层训练没有可用的统一周日历。")
+            return self._fit
+        self._calendar_start = pd.Timestamp(shared_index[0])
+        rows_y = []
+        rows_t = []
+        rows_dates = []
+        rows_offset = []
+        rows_region = []
+        rows_cov = {key: [] for key in COVARIATE_KEYS}
+        used_features = []
+        for region_id in train_ids:
+            frame = prepared[region_id][2]
+            index, values = prepare_weekly(frame, shared_index)
             finite = np.where(np.isfinite(values))[0]
             if finite.size < 8:
                 continue
@@ -155,9 +151,10 @@ class PanelCountModel:
             self._last_index[region_id] = pd.Timestamp(index[int(finite[-1])])
             self._last_level[region_id] = float(values[int(finite[-1])])
             for position in finite:
+                date = pd.Timestamp(index[position])
                 rows_y.append(float(values[position]))
-                rows_t.append(float(position))
-                rows_dates.append(index[position])
+                rows_t.append(float((date - self._calendar_start).days / 7.0))
+                rows_dates.append(date)
                 rows_offset.append(offset)
                 rows_region.append(region_id)
                 for key in COVARIATE_KEYS:
@@ -182,10 +179,13 @@ class PanelCountModel:
         design = calendar if not extra else np.column_stack([calendar, *extra])
         offset = np.asarray(rows_offset, dtype=float)
         try:
-            mu, coef = _irls(design, y, offset)
+            mu, coef, info = _irls(design, y, offset)
         except Exception as exc:  # noqa: BLE001
             self._fit = FitResult("failed", f"分层计数回归未能收敛：{exc}")
             return self._fit
+        keep = list(info.get("kept_columns") or range(design.shape[1]))
+        if keep and design.shape[1] != len(coef):
+            design = design[:, keep]
         intercepts = {region_id: 0.0 for region_id in train_ids}
         if self._mode != "pooled_glm":
             with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
@@ -203,8 +203,13 @@ class PanelCountModel:
                 for region_id in train_ids
             }
             region_offset = offset + np.asarray([intercepts[item] for item in rows_region], dtype=float)
-            mu, coef = _irls(design, y, region_offset)
+            mu, coef, info = _irls(design, y, region_offset)
+            keep = list(info.get("kept_columns") or range(design.shape[1]))
+            if keep and design.shape[1] != len(coef):
+                design = design[:, keep]
         self._coef = coef
+        self._fit_info = info
+        self._keep = list(info.get("kept_columns") or range(len(coef)))
         self._intercepts = intercepts
         self._alpha = _moment_alpha(y, mu)
         for region_id in train_ids:
@@ -244,11 +249,24 @@ class PanelCountModel:
             "n_regions": len(train_ids),
             "dynamic_slope": use_slope,
             "identifiability": IDENTIFIABILITY_NOTE,
+            "estimator": "empirical_bayes_residual_shrinkage",
+            "calendar_start": None if self._calendar_start is None else self._calendar_start.date().isoformat(),
+            **self._fit_info,
         }
-        self._fit = FitResult("success", "已拟合跨地区计数分层。" + IDENTIFIABILITY_NOTE, dict(self._update))
+        if not self._fit_info.get("converged", True):
+            self._fit = FitResult("degraded", self._fit_info.get("message") or "分层 IRLS 未收敛。", dict(self._update))
+            return self._fit
+        self._fit = FitResult("success", "已拟合跨地区计数分层（残差收缩近似）。" + IDENTIFIABILITY_NOTE, dict(self._update))
         return self._fit
 
-    def predict_region(self, region_id: str, horizons: list[int], context: dict | None = None) -> PredictResult:
+    def predict_region(
+        self,
+        region_id: str,
+        horizons: list[int],
+        context: dict | None = None,
+        *,
+        target_week_ends: dict[int, pd.Timestamp] | None = None,
+    ) -> PredictResult:
         if self._fit is None or self._fit.status != "success" or self._coef is None:
             message = self._fit.message if self._fit else "尚未拟合"
             status = self._fit.status if self._fit is not None else "failed"
@@ -271,19 +289,37 @@ class PanelCountModel:
             extra.append(0.0 if value is None or not np.isfinite(value) else float(value) - self._cov_means[key])
         output: dict[int, HorizonForecast] = {}
         phi = 0.75
+        origin = self._calendar_start or pd.Timestamp(anchor)
         for horizon in horizons:
-            future_date = pd.Timestamp(anchor) + pd.Timedelta(days=7 * int(horizon))
-            future_index = np.array([self._scale + int(horizon)], dtype=float)
+            if target_week_ends is not None:
+                if int(horizon) not in target_week_ends:
+                    return PredictResult(self.model_id, "failed", "目标周字典缺少对应预测时长。", metadata={"region_id": region_id})
+                future_date = pd.Timestamp(target_week_ends[int(horizon)])
+                try:
+                    steps = weeks_between(anchor, future_date)
+                except Exception as exc:  # noqa: BLE001
+                    return PredictResult(self.model_id, "failed", str(exc), metadata={"region_id": region_id})
+                if steps < 1:
+                    return PredictResult(self.model_id, "failed", "目标周不晚于最后可见周，拒绝改贴日期。", metadata={"region_id": region_id})
+            else:
+                future_date = pd.Timestamp(anchor) + pd.Timedelta(days=7 * int(horizon))
+                steps = int(horizon)
+            future_index = np.array([(future_date - origin).days / 7.0], dtype=float)
             calendar = _design(future_index, pd.DatetimeIndex([future_date]), self._scale)[0]
             row = calendar if not extra else np.concatenate([calendar, np.asarray(extra, dtype=float)])
+            if self._keep is not None and row.size > max(self._keep):
+                row = row[self._keep]
             if row.size < self._coef.size:
                 row = np.pad(row, (0, self._coef.size - row.size))
             elif row.size > self._coef.size:
                 row = row[: self._coef.size]
-            increment = slope * (phi * (1.0 - phi ** int(horizon)) / (1.0 - phi)) if abs(1.0 - phi) > 1e-9 else slope * int(horizon)
+            increment = slope * (phi * (1.0 - phi ** int(steps)) / (1.0 - phi)) if abs(1.0 - phi) > 1e-9 else slope * int(steps)
             mean = float(np.exp(np.clip(float(np.dot(row, self._coef)) + offset + intercept + increment, -20, 12)))
             last_level = float(self._last_level.get(region_id, mean))
-            mean = float(min(mean, max(40.0, 6.0 * max(last_level, 1.0))))
+            cap = 20.0 * max(last_level, 1.0)
+            if mean > cap:
+                mean = float(cap)
+                note += " 均值外推超过最近水平的 20 倍，已截断并记录；这是数值保护，不是已校准区间。"
             quantiles, method = predictive_quantiles(mean, self._alpha)
             output[int(horizon)] = HorizonForecast(int(horizon), quantiles, method, note)
         metadata = {
