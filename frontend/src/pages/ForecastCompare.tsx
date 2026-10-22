@@ -13,6 +13,10 @@ const MODEL_COLORS: Record<string, string> = {
   equal_weight: "#3f7d5a",
   dynamic_weight: "#9a4a3a",
   adaptive: "#102a33",
+  analog: "#7c3aed",
+  pooled_glm: "#0f766e",
+  hierarchical: "#1d4ed8",
+  hierarchical_dynamic: "#9f1239",
 };
 
 export function ForecastCompare() {
@@ -120,6 +124,15 @@ export function ForecastCompare() {
     return row?.weights || {};
   }, [forecasts]);
 
+  const analogNote = useMemo(() => {
+    const cutoffs = [...forecasts].map((row) => row.cutoff_time).sort();
+    const latestCutoff = cutoffs.length ? cutoffs[cutoffs.length - 1] : null;
+    const row = forecasts.find((item) => item.cutoff_time === latestCutoff && item.model_id === "analog");
+    const extra = row?.extra || {};
+    if (!extra.analog_id && !row?.quality_note) return null;
+    return extra;
+  }, [forecasts]);
+
   const modelSummary = summary?.models ? Object.entries(summary.models) : [];
   const pendingCount = evaluations.filter((row) => row.status === "pending").length;
 
@@ -154,6 +167,19 @@ export function ForecastCompare() {
 
       <ChartPanel title="历史 1 周预测中位数 vs 成熟实际值" option={curveOption} empty="尚无时长=1 的预测" />
       <ChartPanel title="最新截止时间的适应系统预测范围" option={fanOption} empty="尚无适应系统预测区间" />
+
+      {analogNote ? (
+        <section className="rounded-2xl border border-violet-200 bg-violet-50/70 p-4 text-sm">
+          <h3 className="font-display text-lg">历史形态类比</h3>
+          <p className="mt-2 text-slate-700">
+            对齐 {analogNote.analog_id || "未知形态"} · 阶段 {analogNote.phase || "—"} · 方向 {analogNote.direction || "—"} ·
+            综合相似度 {analogNote.similarity != null ? Number(analogNote.similarity).toFixed(2) : "—"}
+          </p>
+          <p className="mt-2 text-xs text-slate-500">
+            形态类比使用归一化历史曲线或对照地区，不是真实病例数训练，也不默认优于等权或基线。
+          </p>
+        </section>
+      ) : null}
 
       <div className="grid gap-4 md:grid-cols-2">
         <section className="rounded-2xl border border-slate-200/80 bg-white/80 p-4">
@@ -201,6 +227,72 @@ export function ForecastCompare() {
           </div>
         </section>
       </div>
+
+      <section className="rounded-2xl border border-slate-200/80 bg-white/80 p-4">
+        <h3 className="font-display text-lg">地区可靠性（成熟评价）</h3>
+        <p className="mt-1 text-xs text-slate-500">WIS 越低越好。没有足够评分时不展示准确率。分层不默认优于统一或独立模型。</p>
+        <div className="mt-3 overflow-x-auto">
+          <table className="min-w-full text-left text-sm">
+            <thead>
+              <tr className="border-b text-slate-500">
+                <th className="py-2 pr-3">模型</th>
+                <th className="py-2 pr-3">地区</th>
+                <th className="py-2 pr-3">n</th>
+                <th className="py-2 pr-3">MAE</th>
+                <th className="py-2 pr-3">WIS</th>
+                <th className="py-2 pr-3">80% 覆盖</th>
+              </tr>
+            </thead>
+            <tbody>
+              {modelSummary.flatMap(([modelId, row]: any) =>
+                Object.entries(row.by_region || {}).map(([rid, stats]: any) => (
+                  <tr key={`${modelId}-${rid}`} className="border-b border-slate-100">
+                    <td className="py-2 pr-3">{modelId}</td>
+                    <td className="py-2 pr-3">{rid}</td>
+                    <td className="py-2 pr-3">{stats.n}</td>
+                    <td className="py-2 pr-3">{stats.mae?.toFixed?.(2)}</td>
+                    <td className="py-2 pr-3">{stats.wis?.toFixed?.(2)}</td>
+                    <td className="py-2 pr-3">{((stats.coverage_80 || 0) * 100).toFixed(0)}%</td>
+                  </tr>
+                )),
+              )}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section className="rounded-2xl border border-slate-200/80 bg-white/80 p-4">
+        <h3 className="font-display text-lg">动态调整记录</h3>
+        <p className="mt-1 text-xs text-slate-500">按周回放原点记录。回退表示该原点分层拟合未成功，不使用未成熟结果更新权重。</p>
+        {!(summary?.update_log || []).length ? (
+          <EmptyState title="尚无更新记录" detail="运行包含分层或动态分层臂的回放后会出现。" />
+        ) : (
+          <div className="mt-3 max-h-72 overflow-auto">
+            <table className="min-w-full text-left text-sm">
+              <thead>
+                <tr className="border-b text-slate-500">
+                  <th className="py-2 pr-3">时间</th>
+                  <th className="py-2 pr-3">模型</th>
+                  <th className="py-2 pr-3">动作</th>
+                  <th className="py-2 pr-3">触发</th>
+                  <th className="py-2 pr-3">回退</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(summary.update_log || []).slice(-40).map((row: any, index: number) => (
+                  <tr key={`${row.cutoff}-${row.model_id}-${index}`} className="border-b border-slate-100">
+                    <td className="py-2 pr-3">{row.cutoff}</td>
+                    <td className="py-2 pr-3">{row.model_id}</td>
+                    <td className="py-2 pr-3">{row.action}</td>
+                    <td className="py-2 pr-3">{row.trigger}</td>
+                    <td className="py-2 pr-3">{row.rollback ? "是" : "否"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
 
       <section className="rounded-2xl border border-slate-200/80 bg-white/80 p-4">
         <h3 className="font-display text-lg">历史预测与成熟结果</h3>

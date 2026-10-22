@@ -28,6 +28,13 @@ export const api = {
   connectors: () => request<any[]>("/api/connectors"),
   models: () => request<any>("/api/models"),
   history: () => request<any[]>("/api/history-cards"),
+  analogs: () => request<any>("/api/analogs"),
+  analogMatch: (body: Record<string, unknown>) =>
+    request<any>("/api/analogs/match", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
   overview: (diseaseId: string, regionId: string, cutoff?: string) => {
     const q = new URLSearchParams({ disease_id: diseaseId, region_id: regionId });
     if (cutoff) q.set("cutoff", cutoff);

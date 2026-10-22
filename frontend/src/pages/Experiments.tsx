@@ -4,7 +4,18 @@ import { EmptyState } from "../components/EmptyState";
 import { Loading } from "../components/Loading";
 import { StatusBadge } from "../components/StatusBadge";
 
-const DEFAULT_MODELS = ["persistence", "fixed_glm", "retrain_glm", "equal_weight", "dynamic_weight", "adaptive"];
+const DEFAULT_MODELS = [
+  "persistence",
+  "fixed_glm",
+  "retrain_glm",
+  "pooled_glm",
+  "hierarchical",
+  "hierarchical_dynamic",
+  "equal_weight",
+  "dynamic_weight",
+  "adaptive",
+  "analog",
+];
 
 export function Experiments() {
   const [diseases, setDiseases] = useState<any[]>([]);
@@ -28,7 +39,15 @@ export function Experiments() {
     train_window_weeks: 52,
     random_seed: 42,
     models: DEFAULT_MODELS,
-    ablations: { no_revision: false, no_anomaly: false, no_dynamic_weight: false },
+    holdout_region_ids: [] as string[],
+    rolling_window_weeks: 52,
+    ablations: {
+      no_revision: false,
+      no_anomaly: false,
+      no_dynamic_weight: false,
+      no_hierarchy: false,
+      no_dynamic_update: false,
+    },
   });
 
   const reload = () =>
@@ -132,6 +151,30 @@ export function Experiments() {
             <input className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2" value={form.cutoff_time} onChange={(e) => setForm({ ...form, cutoff_time: e.target.value })} />
           </label>
           <label className="text-sm">
+            留出地区（冷启动，可多选）
+            <select
+              multiple
+              className="mt-1 h-24 w-full rounded-lg border border-slate-300 px-3 py-2"
+              value={form.holdout_region_ids}
+              onChange={(e) => setForm({ ...form, holdout_region_ids: Array.from(e.target.selectedOptions).map((option) => option.value) })}
+            >
+              {regions.map((item) => (
+                <option key={item.id} value={item.id}>
+                  {item.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="text-sm">
+            动态分层滚动窗口（周）
+            <input
+              type="number"
+              className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2"
+              value={form.rolling_window_weeks}
+              onChange={(e) => setForm({ ...form, rolling_window_weeks: Number(e.target.value) })}
+            />
+          </label>
+          <label className="text-sm">
             训练窗口（周）
             <input
               type="number"
@@ -143,7 +186,7 @@ export function Experiments() {
           <label className="text-sm">
             消融（可多选关闭模块）
             <div className="mt-2 flex flex-wrap gap-3 text-xs">
-              {(["no_revision", "no_anomaly", "no_dynamic_weight"] as const).map((key) => (
+              {(["no_revision", "no_anomaly", "no_dynamic_weight", "no_hierarchy", "no_dynamic_update"] as const).map((key) => (
                 <label key={key} className="inline-flex items-center gap-1">
                   <input
                     type="checkbox"

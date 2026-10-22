@@ -25,6 +25,12 @@ METRICS = {
     "tests": "count",
     "positivity": "proportion",
     "wastewater_index": "index",
+    "mobility_index": "index",
+    "vaccination_coverage": "proportion",
+    "prior_infection_estimate": "proportion",
+    "school_in_session": "proportion",
+    "public_health_measure_index": "index",
+    "variant_share": "proportion",
 }
 
 QUALITY_ALIASES = {
@@ -152,8 +158,10 @@ def validate_csv_bytes(payload: bytes) -> dict:
             row_errors.append({"row": offset, "column": "quality_flag", "message": "已有数值时，质量标记不能是缺失"})
         if value is not None and metric in METRICS and METRICS[metric] == "count" and value < 0:
             row_errors.append({"row": offset, "column": "value", "message": "计数值不能为负"})
-        if value is not None and metric == "positivity" and not 0 <= value <= 1:
-            row_errors.append({"row": offset, "column": "value", "message": "阳性比例必须在 0 到 1 之间"})
+        if value is not None and metric in {"positivity", "vaccination_coverage", "prior_infection_estimate", "variant_share", "school_in_session"} and not 0 <= value <= 1:
+            row_errors.append({"row": offset, "column": "value", "message": f"{metric} 必须在 0 到 1 之间"})
+        if metric == "vaccination_coverage":
+            row_warnings.append({"row": offset, "column": "metric", "message": "疫苗覆盖率不能直接等同于免疫人口比例。"})
         if value is not None and value > 1_000_000:
             row_warnings.append({"row": offset, "column": "value", "message": "数值大于 100 万，请核对是否串列或单位错误。"})
         if metric == "wastewater_index":

@@ -12,9 +12,12 @@ from sqlalchemy.orm import Session
 
 from aerp import __version__ as AERP_VERSION
 from aerp.core.adapt import AdaptationDecision, candidate_note, choose_window, decide, validation_wis
+from aerp.core.analogs import analog_blend_weight
 from aerp.core.anomaly import detect
 from aerp.core.hashing import canonical_hash, hash_observations
+from aerp.core.models.analog import AnalogShapeModel
 from aerp.core.models.catalog import MODEL_CARDS
+from aerp.core.models.hierarchical import PanelCountModel
 from aerp.core.models.damped import DampedTrendModel
 from aerp.core.models.ensemble import apply_downweight, combine_predictions, dynamic_weights, equal_weight_map
 from aerp.core.models.negbin import NegBinGLMModel
@@ -29,11 +32,23 @@ from aerp.core.synthetic import suggested_origins
 from aerp.core.timeutil import as_timestamp, utcnow
 from aerp.core.vintages import has_multiple_vintages, mature_value, replay_descriptor, select_snapshot
 from aerp.db.models import Alert, Evaluation, Experiment, Forecast, ModelRun
-from aerp.services.observations import labels_frame, observations_frame
+from aerp.services.observations import labels_frame, observations_frame, region_context_map
 
 
 COMPONENT_MODELS = ("persistence", "damped_trend", "retrain_glm")
-DEFAULT_ARMS = ("persistence", "fixed_glm", "retrain_glm", "equal_weight", "dynamic_weight", "adaptive")
+DEFAULT_ARMS = (
+    "persistence",
+    "fixed_glm",
+    "retrain_glm",
+    "pooled_glm",
+    "hierarchical",
+    "hierarchical_dynamic",
+    "equal_weight",
+    "dynamic_weight",
+    "adaptive",
+    "analog",
+)
+PANEL_ARMS = ("pooled_glm", "hierarchical", "hierarchical_dynamic")
 
 
 def dependency_versions() -> dict:
@@ -55,8 +70,10 @@ def create_experiment(db: Session, payload: dict) -> Experiment:
         "ablations": payload.get("ablations") or {"no_revision": False, "no_anomaly": False, "no_dynamic_weight": False},
         "origins": payload.get("origins"),
         "short_window_weeks": payload.get("short_window_weeks", 26),
+        "holdout_region_ids": payload.get("holdout_region_ids") or [],
+        "rolling_window_weeks": payload.get("rolling_window_weeks"),
         "compare_arms": True,
-        "demo_note": "结果由真实计算生成，不保证适应系统优于等权或其他对照。",
+        "demo_note": "结果由真实计算生成，不保证分层或动态模型优于统一、独立或等权对照。",
     }
     config.update(payload.get("config") or {})
     region_ids = list(payload["region_ids"])
@@ -128,6 +145,81 @@ def _fit_components(train: pd.DataFrame, horizons: list[int], fixed_glm_state: d
     return results, fixed_glm_state
 
 
+def _fit_panel_models(
+    trains: dict[str, pd.DataFrame],
+    contexts: dict[str, dict],
+    auxiliaries: dict[str, dict],
+    experiment: Experiment,
+    origin,
+    ablations: dict,
+) -> dict:
+    pack: dict = {arm: {} for arm in PANEL_ARMS}
+    events = []
+    requested = [arm for arm in PANEL_ARMS if arm in (experiment.models or [])]
+    if not requested:
+        pack["_events"] = events
+        return pack
+    holdout = list((experiment.config or {}).get("holdout_region_ids") or [])
+    for arm in requested:
+        if ablations.get("no_hierarchy") and arm in {"hierarchical", "hierarchical_dynamic"}:
+            events.append(
+                {
+                    "cutoff": as_timestamp(origin).isoformat(),
+                    "model_id": arm,
+                    "action": "ablate_hierarchy",
+                    "trigger": "消融：删除分层部分共享，该臂不产生分层预测。",
+                    "rollback": True,
+                }
+            )
+            continue
+        use_slope = arm == "hierarchical_dynamic" and not ablations.get("no_dynamic_update")
+        rolling = 0
+        if arm == "hierarchical_dynamic" and not ablations.get("no_dynamic_update"):
+            rolling = int((experiment.config or {}).get("rolling_window_weeks") or 52)
+        if ablations.get("no_dynamic_update") and arm == "hierarchical_dynamic":
+            events.append(
+                {
+                    "cutoff": as_timestamp(origin).isoformat(),
+                    "model_id": arm,
+                    "action": "ablate_dynamic_update",
+                    "trigger": "消融：删除动态更新，保留固定分层截距。",
+                    "rollback": True,
+                }
+            )
+        model = PanelCountModel(arm)
+        fit = model.fit(
+            trains,
+            contexts=contexts,
+            auxiliaries=auxiliaries,
+            config={
+                "mode": "pooled_glm" if arm == "pooled_glm" else "hierarchical",
+                "holdout_region_ids": holdout,
+                "rolling_window_weeks": rolling,
+                "dynamic_slope": use_slope,
+                "horizons": experiment.horizons,
+            },
+        )
+        for region_id in trains:
+            pack[arm][region_id] = model.predict_region(region_id, experiment.horizons, contexts.get(region_id))
+        events.append(
+            {
+                "cutoff": as_timestamp(origin).isoformat(),
+                "model_id": arm,
+                "action": "weekly_refit",
+                "status": fit.status,
+                "trigger": "按周回放原点更新",
+                "window": (fit.metadata or {}).get("window"),
+                "used_features": (fit.metadata or {}).get("used_features"),
+                "holdout_region_ids": holdout,
+                "dynamic_slope": use_slope,
+                "validation": fit.message if fit.status != "success" else "分层拟合完成，待用成熟预测评价。",
+                "rollback": fit.status != "success",
+            }
+        )
+    pack["_events"] = events
+    return pack
+
+
 def _revision_deltas(vintages: pd.DataFrame, cutoff) -> np.ndarray | None:
     profile = estimate_revision(vintages, cutoff)
     if not profile.get("estimable"):
@@ -153,6 +245,7 @@ def _predict_arms(
     train_frame: pd.DataFrame,
     config: dict,
     ablations: dict,
+    analog_pred=None,
 ) -> dict:
     outputs = {}
     component_preds = [components[item]["predict"] for item in COMPONENT_MODELS if components[item].get("predict")]
@@ -197,6 +290,8 @@ def _predict_arms(
         outputs["retrain_glm"] = components["retrain_glm"]["predict"]
     if "damped_trend" in arm_ids and components["damped_trend"].get("predict"):
         outputs["damped_trend"] = components["damped_trend"]["predict"]
+    if "analog" in arm_ids and analog_pred is not None:
+        outputs["analog"] = analog_pred
     if "equal_weight" in arm_ids:
         outputs["equal_weight"] = combine_predictions(
             component_preds,
@@ -212,16 +307,28 @@ def _predict_arms(
             note=dyn_note + " " + (candidate_note(component_preds) or ""),
         )
     if "adaptive" in arm_ids:
-        adaptive_components = component_preds
+        adaptive_components = list(component_preds)
+        adaptive_weights = dict(dyn_weights)
+        analog_note = "未并入历史形态类比。"
+        if analog_pred is not None and analog_pred.status == "success":
+            blend = analog_blend_weight((analog_pred.metadata or {}).get("similarity"))
+            if blend > 0:
+                remaining = 1.0 - blend
+                adaptive_weights = {key: value * remaining for key, value in dyn_weights.items()}
+                adaptive_weights["analog"] = blend
+                adaptive_components = list(component_preds) + [analog_pred]
+                analog_note = f"历史形态类比权重 {blend:.2f}。类比不是真实跨疾病训练。"
+            else:
+                analog_note = "历史形态相似度不足，类比未进入适应组合。"
         if decision.use_revision_adjustment and not ablations.get("no_revision"):
             note_extra = "已启用修订模块调整训练输入；修订不确定性第一版未完整传入预测区间。"
         else:
             note_extra = "未启用修订调整。" if ablations.get("no_revision") else "规则未要求修订调整。"
         adaptive = combine_predictions(
             adaptive_components,
-            dyn_weights,
+            adaptive_weights,
             model_id="adaptive",
-            note="异常识别与适应规则。" + " ".join(decision.notes) + " " + window_note + " " + note_extra,
+            note="异常识别与适应规则。" + " ".join(decision.notes) + " " + window_note + " " + note_extra + " " + analog_note,
         )
         if adaptive.status == "success" and decision.interval_scale != 1.0:
             for horizon, item in adaptive.horizons.items():
@@ -289,7 +396,14 @@ def _store_forecasts(
                 generated_at=generated_at,
                 arm=arm,
                 weights=result.metadata.get("weights") or {},
-                extra={"message": result.message},
+                extra={
+                    "message": result.message,
+                    "analog_id": result.metadata.get("analog_id"),
+                    "similarity": result.metadata.get("similarity"),
+                    "phase": result.metadata.get("phase"),
+                    "direction": result.metadata.get("direction"),
+                    "context_score": result.metadata.get("context_score"),
+                },
             )
             db.add(row)
             saved.append(row)
@@ -420,6 +534,16 @@ def _summarize(db: Session, experiment: Experiment, labels: pd.DataFrame) -> dic
                 "wis": float(np.mean([row.wis for row in subset])),
                 "n": len(subset),
             }
+        by_region = {}
+        for region_id in sorted({row.region_id for row in rows}):
+            subset = [row for row in rows if row.region_id == region_id]
+            by_region[region_id] = {
+                "mae": float(np.mean([row.abs_error for row in subset])),
+                "wis": float(np.mean([row.wis for row in subset])),
+                "coverage_80": float(np.mean([row.covered_80 for row in subset])),
+                "n": len(subset),
+            }
+        model_summary[model_id]["by_region"] = by_region
         for phase in sorted({row.phase for row in rows}):
             subset = [row for row in rows if row.phase == phase]
             model_summary[model_id]["by_phase"][phase] = {
@@ -458,6 +582,21 @@ def _summarize(db: Session, experiment: Experiment, labels: pd.DataFrame) -> dic
         "pending_evaluations": pending,
         "alert_skill": skill,
         "recovery": recovery,
+        "recovery_hierarchical_dynamic": recovery_summary(
+            [
+                {
+                    "model_id": row.model_id,
+                    "region_id": row.region_id,
+                    "horizon": row.horizon,
+                    "target_period_end": row.target_period_end,
+                    "status": row.status,
+                    "abs_error": row.abs_error,
+                }
+                for row in evaluations
+            ],
+            labels if not labels.empty else None,
+            model_id="hierarchical_dynamic",
+        ),
         "note": "动态组合不默认优于等权。阶段标签仅用于事后分组。",
         "model_cards": MODEL_CARDS,
     }
@@ -479,6 +618,7 @@ def run_experiment(db: Session, experiment_id: str) -> Experiment:
     try:
         all_obs = observations_frame(db, disease_id=experiment.disease_id)
         labels = labels_frame(db)
+        contexts = region_context_map(db)
         multi = has_multiple_vintages(all_obs)
         descriptor = replay_descriptor(experiment.replay_mode, multi)
         ablations = experiment.config.get("ablations") or {}
@@ -507,8 +647,24 @@ def run_experiment(db: Session, experiment_id: str) -> Experiment:
         history_scores: list[dict] = []
         fixed_states: dict[str, dict | None] = {region_id: None for region_id in experiment.region_ids}
         evaluation_as_of = as_timestamp(experiment.cutoff_time)
+        update_events: list[dict] = []
 
         for origin in origins:
+            origin_trains = {}
+            origin_aux = {}
+            for region_id in experiment.region_ids:
+                train_panel = _metric_frame(all_obs, region_id, experiment.target_metric, origin, experiment.replay_mode)
+                if experiment.train_window_weeks:
+                    train_panel = tail_weeks(train_panel, int(experiment.train_window_weeks))
+                origin_trains[region_id] = train_panel
+                origin_aux[region_id] = {
+                    "mobility_index": _metric_frame(all_obs, region_id, "mobility_index", origin, experiment.replay_mode),
+                    "vaccination_coverage": _metric_frame(
+                        all_obs, region_id, "vaccination_coverage", origin, experiment.replay_mode
+                    ),
+                }
+            panel_pack = _fit_panel_models(origin_trains, contexts, origin_aux, experiment, origin, ablations)
+            update_events.extend(panel_pack.get("_events") or [])
             for region_id in experiment.region_ids:
                 admissions_v = all_obs[
                     (all_obs["region_id"] == region_id) & (all_obs["metric"] == experiment.target_metric)
@@ -586,6 +742,31 @@ def run_experiment(db: Session, experiment_id: str) -> Experiment:
                 components, fixed_states[region_id] = _fit_components(
                     train, experiment.horizons, fixed_states[region_id]
                 )
+                peers = {}
+                for other_id in experiment.region_ids:
+                    if other_id == region_id:
+                        continue
+                    other_train = _metric_frame(all_obs, other_id, experiment.target_metric, origin, experiment.replay_mode)
+                    _other_index, other_values = prepare_weekly(other_train)
+                    peers[other_id] = {
+                        "values": other_values,
+                        "context": contexts.get(other_id) or {},
+                        "name": other_id,
+                    }
+                analog_model = AnalogShapeModel()
+                analog_fit = analog_model.fit(
+                    train,
+                    {
+                        "horizons": experiment.horizons,
+                        "context": contexts.get(region_id) or {},
+                        "peers": peers,
+                    },
+                )
+                analog_pred = analog_model.predict(experiment.horizons) if analog_fit.status == "success" else None
+                analog_match = (analog_pred.metadata if analog_pred is not None else analog_model.serialize_metadata()).get("match")
+                local_config = dict(experiment.config or {})
+                local_config["analog_match"] = analog_match
+                local_config["context"] = contexts.get(region_id) or {}
                 # 若适应要求修订，则用修订后序列重训组件供 adaptive 使用
                 adaptive_components = components
                 if any(alert.category == "suspected_reporting_change" for alert in alerts) and not ablations.get("no_revision"):
@@ -598,8 +779,9 @@ def run_experiment(db: Session, experiment_id: str) -> Experiment:
                     cutoff=origin,
                     alerts=alerts,
                     train_frame=train,
-                    config=experiment.config,
+                    config=local_config,
                     ablations=ablations,
+                    analog_pred=analog_pred,
                 )
                 if "adaptive" in experiment.models and adaptive_components is not components:
                     adaptive_only = _predict_arms(
@@ -609,10 +791,14 @@ def run_experiment(db: Session, experiment_id: str) -> Experiment:
                         cutoff=origin,
                         alerts=alerts,
                         train_frame=revised_train,
-                        config=experiment.config,
+                        config=local_config,
                         ablations=ablations,
+                        analog_pred=analog_pred,
                     )
                     predictions["adaptive"] = adaptive_only["adaptive"]
+                for arm in PANEL_ARMS:
+                    if arm in experiment.models and (panel_pack.get(arm) or {}).get(region_id) is not None:
+                        predictions[arm] = panel_pack[arm][region_id]
 
                 saved = _store_forecasts(
                     db,
@@ -662,6 +848,13 @@ def run_experiment(db: Session, experiment_id: str) -> Experiment:
         summary["ablations"] = ablations
         summary["n_forecasts"] = len(all_forecasts)
         summary["n_scored"] = len(final_scores)
+        summary["update_log"] = update_events[-80:]
+        summary["research_question"] = "地区差异建模与动态更新，能否比统一模型、独立地区模型和简单组合提供更可靠的预测？"
+        summary["identifiability"] = (
+            "分层动态更新只调整地区截距和短期斜率。疫苗覆盖率不是免疫比例。"
+            "地区效应不是生物学差异证明。没有分年龄住院时不识别年龄组传播。"
+        )
+        summary["holdout_region_ids"] = list((experiment.config or {}).get("holdout_region_ids") or [])
         experiment.summary = summary
         experiment.status = "completed"
         experiment.finished_at = utcnow()

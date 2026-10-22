@@ -19,9 +19,20 @@ class ExperimentCreate(BaseModel):
     random_seed: int = 42
     short_window_weeks: int = 26
     origins: list[str] | None = None
+    holdout_region_ids: list[str] | None = None
+    rolling_window_weeks: int | None = 52
     ablations: dict[str, bool] | None = None
     config: dict[str, Any] | None = None
 
 
 class AlertReviewUpdate(BaseModel):
     review_status: str
+
+
+class AnalogMatchRequest(BaseModel):
+    disease_id: str
+    region_id: str
+    cutoff: str | None = None
+    metric: str = "hospital_admissions"
+    replay_mode: str = "vintage"
+    horizons: list[int] = Field(default_factory=lambda: [1, 2, 3, 4])

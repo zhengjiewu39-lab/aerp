@@ -25,6 +25,7 @@ class Region(Base):
     population: Mapped[int | None] = mapped_column(Integer, nullable=True)
     scenario: Mapped[str | None] = mapped_column(String(64), nullable=True)
     note: Mapped[str] = mapped_column(Text, default="")
+    context_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
 
 class DataSource(Base):

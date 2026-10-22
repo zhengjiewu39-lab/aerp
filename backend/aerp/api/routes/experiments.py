@@ -117,6 +117,7 @@ def forecasts(experiment_id: str, region_id: str | None = None, db: Session = De
             "quality_note": row.quality_note,
             "generated_at": row.generated_at.isoformat(sep=" ", timespec="seconds"),
             "weights": row.weights,
+            "extra": row.extra or {},
         }
         for row in rows
     ]

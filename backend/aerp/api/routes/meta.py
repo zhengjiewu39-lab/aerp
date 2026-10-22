@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 
 from aerp import __version__
 from aerp.core.disclaimer import DISCLAIMER
+from aerp.core.analogs import analog_summaries
 from aerp.core.models.catalog import MODEL_CARDS
 from aerp.core.models.transfer import TransferModel
 from aerp.db.session import get_db
@@ -39,6 +40,12 @@ def meta(db: Session = Depends(get_db)):
         "banner": banner,
         "research_question": "在监测数据修订或疫情趋势突然变化时，先识别变化类型再更新模型，是否比直接在线更新更可靠？",
         "transfer": TransferModel().serialize_metadata(),
+        "analog": {
+            "available": True,
+            "model_id": "analog",
+            "disclaimer": analog_summaries()[0]["disclaimer"] if analog_summaries() else "",
+            "n_templates": len(analog_summaries()),
+        },
     }
 
 

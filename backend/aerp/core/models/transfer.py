@@ -13,10 +13,11 @@ class TransferModel:
         config = config or {}
         return {
             "status": "not_implemented",
-            "message": "研究扩展，尚未实现",
+            "message": "真实跨疾病病例序列迁移尚未实现。可用的是历史形态类比（analog），它不把编造病例数当作训练数据。",
             "source_disease_id": config.get("source_disease_id"),
             "target_disease_id": config.get("target_disease_id"),
             "exclude_target_from_training": bool(config.get("exclude_target_from_training", True)),
+            "related_model": "analog",
             "outputs": None,
         }
 
@@ -25,13 +26,18 @@ class TransferModel:
         raise NotImplementedError("研究扩展，尚未实现")
 
     def diagnostics(self) -> dict[str, Any]:
-        return {"status": "not_implemented", "message": "研究扩展，尚未实现"}
+        return {
+            "status": "not_implemented",
+            "message": "真实跨疾病迁移尚未实现；请使用 analog 形态类比，并保留不迁移基线。",
+            "related_model": "analog",
+        }
 
     def serialize_metadata(self) -> dict[str, Any]:
         return {
             "model_id": self.model_id,
             "status": "not_implemented",
-            "message": "研究扩展，尚未实现",
+            "message": "真实跨疾病迁移尚未实现。历史形态类比是独立研究臂，不声称已经完成迁移学习。",
+            "related_model": "analog",
             "keeps_no_transfer_baseline": True,
             "outputs": None,
         }

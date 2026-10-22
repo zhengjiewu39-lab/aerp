@@ -59,6 +59,29 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     get_settings.cache_clear()
 
 
+def test_analog_library_and_match(client: TestClient):
+    catalog = client.get("/api/analogs")
+    assert catalog.status_code == 200
+    body = catalog.json()
+    assert body["items"]
+    assert all(item["trainable_series"] is False for item in body["items"])
+    regions = client.get("/api/regions")
+    assert regions.status_code == 200
+    first = regions.json()[0]
+    assert first["context"]["available"]
+    matched = client.post(
+        "/api/analogs/match",
+        json={"disease_id": "synth-ari", "region_id": "R1"},
+    )
+    assert matched.status_code == 200, matched.text
+    payload = matched.json()
+    assert payload["status"] in {"success", "degraded"}
+    assert "disclaimer" in payload
+    overview = client.get("/api/overview", params={"disease_id": "synth-ari", "region_id": "R1"})
+    assert overview.status_code == 200
+    assert "analog" in overview.json()
+
+
 def test_health_and_template(client: TestClient):
     health = client.get("/api/health")
     assert health.status_code == 200
@@ -143,7 +166,7 @@ def test_ablation_suite_compares_without_forced_winner(client: TestClient):
     result = body.get("result") or body
     assert body.get("status") in {"completed", "queued", "running"}
     if body.get("status") == "completed":
-        assert len(result["variants"]) == 4
+        assert len(result["variants"]) == 6
         assert "comparison" in result
         assert "不默认优于" in result["comparison"]["note"] or "真实回放" in result["comparison"]["note"]
         assert all(item["status"] in {"completed", "failed"} for item in result["variants"])

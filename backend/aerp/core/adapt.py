@@ -5,7 +5,9 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
+from aerp.core.analogs import apply_analog_to_decision
 from aerp.core.anomaly import AlertDraft
+from aerp.core.context import interval_scale_for_context
 from aerp.core.models.base import PredictResult
 from aerp.core.models.damped import DampedTrendModel
 from aerp.core.scoring import score_forecast
@@ -43,6 +45,13 @@ def decide(alerts: list[AlertDraft], config: dict | None = None) -> AdaptationDe
         if alert.rule == "forecast_error_deterioration":
             decision.downweight_models.extend(alert.affected_models)
             decision.notes.append("已成熟预测的误差持续恶化：降低对应模型权重。")
+    analog_match = config.get("analog_match")
+    if analog_match:
+        apply_analog_to_decision(decision, analog_match)
+    context_scale, context_note = interval_scale_for_context(config.get("context"))
+    if context_note:
+        decision.interval_scale = max(float(decision.interval_scale), float(context_scale))
+        decision.notes.append(context_note)
     return decision
 
 

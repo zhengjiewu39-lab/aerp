@@ -13,10 +13,116 @@ SOURCE_ID = "synthetic-demo"
 BATCH_ID = "synthetic-demo-seed"
 
 REGIONS = (
-    {"region_id": "R1", "name": "北部示范区", "scenario": "stable_seasonal", "population": 2_000_000},
-    {"region_id": "R2", "name": "东部示范区", "scenario": "true_growth", "population": 3_500_000},
-    {"region_id": "R3", "name": "西部示范区", "scenario": "reporting_change", "population": 1_200_000},
-    {"region_id": "R4", "name": "南部示范区", "scenario": "delay_missing", "population": 800_000},
+    {
+        "region_id": "R1",
+        "name": "北部示范区",
+        "scenario": "stable_seasonal",
+        "population": 2_000_000,
+        "context": {
+            "country": "北国（演示）",
+            "country_id": "C-NORTH",
+            "climate_zone": "temperate",
+            "setting": "urban",
+            "age_structure": "aging",
+            "healthcare_capacity": "high",
+            "mobility": "medium",
+            "population_density": "high",
+            "age_distribution": {"0_17": 0.14, "18_64": 0.58, "65plus": 0.28},
+            "household_size": 2.2,
+            "crowding_index": 0.42,
+            "is_demo_label": True,
+            "ethnicity_analysis": "skipped_no_data",
+            "note": "合成地区上下文标签，不是真实普查或卫生系统评价。未提供族裔数据，不推断族裔标签。",
+        },
+    },
+    {
+        "region_id": "R2",
+        "name": "东部示范区",
+        "scenario": "true_growth",
+        "population": 3_500_000,
+        "context": {
+            "country": "东国（演示）",
+            "country_id": "C-EAST",
+            "climate_zone": "subtropical",
+            "setting": "megacity",
+            "age_structure": "young",
+            "healthcare_capacity": "high",
+            "mobility": "high",
+            "population_density": "high",
+            "age_distribution": {"0_17": 0.22, "18_64": 0.68, "65plus": 0.10},
+            "household_size": 3.1,
+            "crowding_index": 0.78,
+            "is_demo_label": True,
+            "ethnicity_analysis": "skipped_no_data",
+            "note": "合成地区上下文标签，不是真实普查或卫生系统评价。未提供族裔数据，不推断族裔标签。",
+        },
+    },
+    {
+        "region_id": "R3",
+        "name": "西部示范区",
+        "scenario": "reporting_change",
+        "population": 1_200_000,
+        "context": {
+            "country": "西国（演示）",
+            "country_id": "C-WEST",
+            "climate_zone": "arid",
+            "setting": "mixed",
+            "age_structure": "balanced",
+            "healthcare_capacity": "medium",
+            "mobility": "medium",
+            "population_density": "medium",
+            "age_distribution": {"0_17": 0.18, "18_64": 0.66, "65plus": 0.16},
+            "household_size": 2.8,
+            "crowding_index": 0.50,
+            "is_demo_label": True,
+            "ethnicity_analysis": "skipped_no_data",
+            "note": "合成地区上下文标签，不是真实普查或卫生系统评价。未提供族裔数据，不推断族裔标签。",
+        },
+    },
+    {
+        "region_id": "R4",
+        "name": "南部示范区",
+        "scenario": "delay_missing",
+        "population": 800_000,
+        "context": {
+            "country": "南国（演示）",
+            "country_id": "C-SOUTH",
+            "climate_zone": "tropical",
+            "setting": "rural",
+            "age_structure": "young",
+            "healthcare_capacity": "low",
+            "mobility": "low",
+            "population_density": "low",
+            "age_distribution": {"0_17": 0.28, "18_64": 0.62, "65plus": 0.10},
+            "household_size": 3.6,
+            "crowding_index": 0.35,
+            "is_demo_label": True,
+            "ethnicity_analysis": "skipped_no_data",
+            "note": "合成地区上下文标签，不是真实普查或卫生系统评价。未提供族裔数据，不推断族裔标签。",
+        },
+    },
+    {
+        "region_id": "R5",
+        "name": "北部稀疏县",
+        "scenario": "sparse",
+        "population": 180_000,
+        "context": {
+            "country": "北国（演示）",
+            "country_id": "C-NORTH",
+            "climate_zone": "temperate",
+            "setting": "rural",
+            "age_structure": "aging",
+            "healthcare_capacity": "low",
+            "mobility": "low",
+            "population_density": "low",
+            "age_distribution": {"0_17": 0.16, "18_64": 0.52, "65plus": 0.32},
+            "household_size": 2.0,
+            "crowding_index": 0.22,
+            "is_demo_label": True,
+            "ethnicity_analysis": "skipped_no_data",
+            "note": "与北部示范区同属演示北国，用于检验小样本地区的部分共享。不是真实县。",
+        },
+    },
 )
 
 SCENARIO_NOTES = {
@@ -24,6 +130,7 @@ SCENARIO_NOTES = {
     "true_growth": "第 50 周之后提高模拟中的传播强度，住院在感染之后上升。",
     "reporting_change": "潜在传播不变。第 62 周同时提高病例报告比例和检测量，住院生成过程不变。",
     "delay_missing": "潜在传播与北部相近，但第 68 周后初报更不完整，并插入缺失周。",
+    "sparse": "与北部同属演示国家，潜在传播较弱，报告更稀疏，用于分层借用信息。",
 }
 
 
@@ -44,6 +151,8 @@ class SyntheticBundle:
 def _beta(n_weeks: int, scenario: str) -> np.ndarray:
     week = np.arange(n_weeks)
     seasonal = 0.92 + 0.16 * np.sin(2 * np.pi * (week - 12) / 52.0)
+    if scenario == "sparse":
+        return 0.62 + 0.10 * np.sin(2 * np.pi * (week - 12) / 52.0)
     if scenario != "true_growth":
         return seasonal
     beta = seasonal.copy()
@@ -74,6 +183,8 @@ def _series_for_region(spec: dict, n_weeks: int, seed: int, region_index: int) -
     ascertainment = np.full(n_weeks, 0.35)
     if spec["scenario"] == "reporting_change":
         ascertainment[min(62, n_weeks) :] = 0.82
+    if spec["scenario"] == "sparse":
+        ascertainment[:] = 0.22
     for week in range(n_weeks):
         source = infections[week - 2] if week >= 2 else infections[0] * 0.25
         admissions[week] = float(rng.poisson(max(0.045 * source, 0.0)))
@@ -109,6 +220,7 @@ def generate_synthetic(seed: int = 42, n_weeks: int = 104, start: str = "2023-01
         "R4": (68, "data_quality"),
     }
     missing_weeks = {72, 73, 81, 90}
+    sparse_missing = {18, 19, 33, 34, 47, 61, 62, 75, 76, 88, 89, 97}
     for region_index, spec in enumerate(REGIONS):
         generated = _series_for_region(spec, n_weeks, seed, region_index)
         rng = generated["rng"]
@@ -180,6 +292,74 @@ def generate_synthetic(seed: int = 42, n_weeks: int = 104, start: str = "2023-01
                         positivity_quality,
                     )
                 )
+            aux_missing = spec["scenario"] == "sparse" and week in sparse_missing
+            mobility = 0.45 + 0.20 * np.sin(2 * np.pi * (week - 6) / 52.0)
+            if spec["scenario"] == "true_growth" and week >= 50:
+                mobility += 0.12
+            if spec["scenario"] == "sparse":
+                mobility *= 0.55
+            coverage = min(0.62, 0.08 + 0.0045 * week)
+            if spec["scenario"] == "sparse":
+                coverage *= 0.7
+            prior = min(0.40, float(np.clip(generated["infections"][: week + 1].sum() / max(spec["population"] * 0.02, 1.0), 0, 0.40)))
+            school = 0.0 if 26 <= (week % 52) <= 34 else 1.0
+            measure = 0.20
+            if spec["scenario"] == "true_growth" and week >= 52:
+                measure = 0.65
+            observation_rows.extend(
+                [
+                    _observation(
+                        spec["region_id"],
+                        period_starts[week],
+                        period_ends[week],
+                        period_ends[week] + pd.Timedelta(days=1),
+                        "mobility_index",
+                        None if aux_missing else float(np.round(mobility, 4)),
+                        "index",
+                        "missing" if aux_missing else "complete",
+                    ),
+                    _observation(
+                        spec["region_id"],
+                        period_starts[week],
+                        period_ends[week],
+                        period_ends[week] + pd.Timedelta(days=1),
+                        "vaccination_coverage",
+                        None if aux_missing else float(np.round(coverage, 4)),
+                        "proportion",
+                        "missing" if aux_missing else "complete",
+                    ),
+                    _observation(
+                        spec["region_id"],
+                        period_starts[week],
+                        period_ends[week],
+                        period_ends[week] + pd.Timedelta(days=1),
+                        "prior_infection_estimate",
+                        None if aux_missing else float(np.round(prior, 4)),
+                        "proportion",
+                        "missing" if aux_missing else "complete",
+                    ),
+                    _observation(
+                        spec["region_id"],
+                        period_starts[week],
+                        period_ends[week],
+                        period_ends[week] + pd.Timedelta(days=1),
+                        "school_in_session",
+                        None if aux_missing else float(school),
+                        "proportion",
+                        "missing" if aux_missing else "complete",
+                    ),
+                    _observation(
+                        spec["region_id"],
+                        period_starts[week],
+                        period_ends[week],
+                        period_ends[week] + pd.Timedelta(days=1),
+                        "public_health_measure_index",
+                        None if aux_missing else float(measure),
+                        "index",
+                        "missing" if aux_missing else "complete",
+                    ),
+                ]
+            )
         if spec["region_id"] in label_plan and label_plan[spec["region_id"]][0] < n_weeks:
             week, category = label_plan[spec["region_id"]]
             label_rows.append(
@@ -205,7 +385,8 @@ def generate_synthetic(seed: int = 42, n_weeks: int = 104, start: str = "2023-01
                 "name": item["name"],
                 "population": item["population"],
                 "scenario": item["scenario"],
-                "note": SCENARIO_NOTES[item["scenario"]] + " 人口只作背景，不计算人均指标。",
+                "note": SCENARIO_NOTES[item["scenario"]] + " 人口只作背景，不计算人均指标。疫苗覆盖率不是免疫比例。",
+                "context": {**(item.get("context") or {}), "population": item["population"]},
             }
             for item in REGIONS
         ],
@@ -227,11 +408,14 @@ def generate_synthetic(seed: int = 42, n_weeks: int = 104, start: str = "2023-01
             "合成数据区分潜在感染、观测病例、住院、检测量、发布版本和模拟真值。"
             "住院使用感染后两周的量，病例使用当周感染。模拟真值不进入观测表。"
             "SIRS 骨架只用于生成曲线，不从住院数据反推参数。"
+            "时变辅助变量为合成演示，疫苗覆盖率不能当作免疫人口。"
         ),
     )
 
 
 def _is_missing_vintage(scenario: str, week: int, lag: int, missing_weeks: set[int]) -> bool:
+    if scenario == "sparse" and week % 3 == 0 and lag == 1:
+        return True
     if scenario != "delay_missing" or week not in missing_weeks:
         return False
     if lag == 1:

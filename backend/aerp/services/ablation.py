@@ -11,10 +11,12 @@ from aerp.services.observations import observations_frame
 
 
 ABLATION_VARIANTS = (
-    {"key": "full", "label": "完整系统", "ablations": {"no_revision": False, "no_anomaly": False, "no_dynamic_weight": False}},
-    {"key": "no_revision", "label": "删除修订处理", "ablations": {"no_revision": True, "no_anomaly": False, "no_dynamic_weight": False}},
-    {"key": "no_anomaly", "label": "删除异常检测", "ablations": {"no_revision": False, "no_anomaly": True, "no_dynamic_weight": False}},
-    {"key": "no_dynamic_weight", "label": "删除动态权重", "ablations": {"no_revision": False, "no_anomaly": False, "no_dynamic_weight": True}},
+    {"key": "full", "label": "完整系统", "ablations": {"no_revision": False, "no_anomaly": False, "no_dynamic_weight": False, "no_hierarchy": False, "no_dynamic_update": False}},
+    {"key": "no_revision", "label": "删除修订处理", "ablations": {"no_revision": True, "no_anomaly": False, "no_dynamic_weight": False, "no_hierarchy": False, "no_dynamic_update": False}},
+    {"key": "no_anomaly", "label": "删除异常检测", "ablations": {"no_revision": False, "no_anomaly": True, "no_dynamic_weight": False, "no_hierarchy": False, "no_dynamic_update": False}},
+    {"key": "no_dynamic_weight", "label": "删除动态权重", "ablations": {"no_revision": False, "no_anomaly": False, "no_dynamic_weight": True, "no_hierarchy": False, "no_dynamic_update": False}},
+    {"key": "no_hierarchy", "label": "删除分层部分共享", "ablations": {"no_revision": False, "no_anomaly": False, "no_dynamic_weight": False, "no_hierarchy": True, "no_dynamic_update": False}},
+    {"key": "no_dynamic_update", "label": "删除动态更新", "ablations": {"no_revision": False, "no_anomaly": False, "no_dynamic_weight": False, "no_hierarchy": False, "no_dynamic_update": True}},
 )
 
 

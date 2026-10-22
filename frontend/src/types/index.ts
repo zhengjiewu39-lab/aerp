@@ -11,6 +11,12 @@ export type Region = {
   population: number | null;
   scenario: string | null;
   note: string;
+  context?: {
+    available: boolean;
+    is_demo_label: boolean;
+    fields: { key: string; label: string; value_id: string; value: string }[];
+    note: string;
+  };
 };
 
 export type Banner = {

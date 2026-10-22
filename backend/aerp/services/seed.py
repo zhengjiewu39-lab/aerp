@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from aerp.config import get_settings
 from aerp.core.hashing import sha256_text
-from aerp.core.synthetic import BATCH_ID, SOURCE_ID, generate_synthetic
+from aerp.core.synthetic import BATCH_ID, REGIONS, SOURCE_ID, generate_synthetic
 from aerp.core.timeutil import utcnow
 from aerp.db.models import (
     DataSource,
@@ -37,8 +37,31 @@ def seed_history(db: Session) -> dict:
     del db
     return {
         "seeded": True,
-        "message": "历史资料卡由 /api/history-cards 提供；无可训练伪造序列。",
+        "message": "历史资料卡由 /api/history-cards 提供；无可训练伪造序列。形态类比使用归一化曲线，不是病例数。",
     }
+
+
+def refresh_region_context(db: Session, regions: list[dict] | None = None) -> None:
+    specs = regions or [
+        {
+            "id": item["region_id"],
+            "name": item["name"],
+            "population": item.get("population"),
+            "scenario": item.get("scenario"),
+            "note": item.get("scenario"),
+            "context": item.get("context") or {},
+        }
+        for item in REGIONS
+    ]
+    for spec in specs:
+        region_id = spec.get("id") or spec.get("region_id")
+        if not region_id:
+            continue
+        row = db.get(Region, region_id)
+        if row is None:
+            continue
+        if spec.get("context"):
+            row.context_json = spec["context"]
 
 
 def seed_synthetic(db: Session, seed: int | None = None, force: bool = False, replace: bool | None = None) -> dict:
@@ -48,6 +71,8 @@ def seed_synthetic(db: Session, seed: int | None = None, force: bool = False, re
         force = bool(replace)
     existing = db.get(ImportBatch, BATCH_ID)
     if existing and not force:
+        refresh_region_context(db)
+        db.commit()
         return {"seeded": False, "message": "合成演示数据已存在", "batch_id": BATCH_ID, "seed": seed_value}
 
     if force:
@@ -83,6 +108,7 @@ def seed_synthetic(db: Session, seed: int | None = None, force: bool = False, re
                     population=region.get("population"),
                     scenario=region.get("scenario"),
                     note=region.get("note", ""),
+                    context_json=region.get("context") or {},
                 )
             )
         else:
@@ -90,6 +116,7 @@ def seed_synthetic(db: Session, seed: int | None = None, force: bool = False, re
             row.population = region.get("population")
             row.scenario = region.get("scenario")
             row.note = region.get("note", "")
+            row.context_json = region.get("context") or {}
 
     source = db.get(DataSource, SOURCE_ID)
     if source is None:
@@ -180,5 +207,10 @@ def ensure_seeded(db: Session) -> None:
     if not settings.aerp_auto_seed:
         return
     if db.scalar(select(ImportBatch.id).where(ImportBatch.id == BATCH_ID)):
+        if db.get(Region, "R5") is None:
+            seed_synthetic(db, seed=settings.aerp_demo_seed, force=True, replace=True)
+            return
+        refresh_region_context(db)
+        db.commit()
         return
     seed_synthetic(db, seed=settings.aerp_demo_seed)

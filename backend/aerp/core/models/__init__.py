@@ -1,5 +1,7 @@
 """预测模型注册表。"""
 
+from aerp.core.models.analog import AnalogShapeModel
+from aerp.core.models.hierarchical import IDENTIFIABILITY_NOTE, PanelCountModel
 from aerp.core.models.base import FitResult, HorizonForecast, PredictResult
 from aerp.core.models.catalog import MODEL_CARDS
 from aerp.core.models.damped import DampedTrendModel
@@ -10,6 +12,9 @@ from aerp.core.models.transfer import TransferModel
 
 __all__ = [
     "MODEL_CARDS",
+    "AnalogShapeModel",
+    "IDENTIFIABILITY_NOTE",
+    "PanelCountModel",
     "DampedTrendModel",
     "FitResult",
     "HorizonForecast",

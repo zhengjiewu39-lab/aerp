@@ -6,6 +6,8 @@ import pandas as pd
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from aerp.core.analogs import match_values
+from aerp.core.context import public_context
 from aerp.core.disclaimer import EMPTY_BANNER, IMPORTED_BANNER, SYNTHETIC_BANNER
 from aerp.core.revision import estimate_revision, nowcast_interval
 from aerp.core.series import prepare_weekly
@@ -122,17 +124,35 @@ def list_diseases(db: Session) -> list[dict]:
     ]
 
 
+def region_payload(row: Region) -> dict:
+    raw = dict(row.context_json or {})
+    if row.population is not None:
+        raw.setdefault("population", row.population)
+    context = public_context(raw)
+    return {
+        "id": row.id,
+        "name": row.name,
+        "population": row.population,
+        "country_id": raw.get("country_id"),
+        "scenario": row.scenario,
+        "note": row.note,
+        "context": context,
+        "profile": context.get("profile") or {},
+    }
+
+
 def list_regions(db: Session) -> list[dict]:
-    return [
-        {
-            "id": row.id,
-            "name": row.name,
-            "population": row.population,
-            "scenario": row.scenario,
-            "note": row.note,
-        }
-        for row in db.scalars(select(Region)).all()
-    ]
+    return [region_payload(row) for row in db.scalars(select(Region)).all()]
+
+
+def region_context_map(db: Session) -> dict[str, dict]:
+    mapping = {}
+    for row in db.scalars(select(Region)).all():
+        raw = dict(row.context_json or {})
+        if row.population is not None:
+            raw["population"] = row.population
+        mapping[row.id] = raw
+    return mapping
 
 
 def list_sources(db: Session) -> list[dict]:
@@ -226,12 +246,15 @@ def overview(db: Session, disease_id: str, region_id: str, cutoff: datetime | st
         "has_multiple_vintages": has_multiple_vintages(frame),
         "trust_note": "数据可信程度依据版本完整性与质量标记，不是大流行概率。",
     }
+    region = next((item for item in list_regions(db) if item["id"] == region_id), None)
+    analog = match_values(values, context=None if region is None else (region.get("context") or {}).get("raw"))
     return {
         "banner": banner,
         "series": series,
         "revision": revision,
         "nowcast": nowcast,
         "quality": quality,
-        "region": next((item for item in list_regions(db) if item["id"] == region_id), None),
+        "region": region,
         "disease": next((item for item in list_diseases(db) if item["id"] == disease_id), None),
+        "analog": analog,
     }

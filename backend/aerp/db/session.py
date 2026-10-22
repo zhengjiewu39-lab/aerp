@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Generator
 
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from aerp.config import get_settings
@@ -43,3 +43,17 @@ def init_db() -> None:
     from aerp import db as _models  # noqa: F401
 
     Base.metadata.create_all(bind=engine)
+    _ensure_region_context_column()
+
+
+def _ensure_region_context_column() -> None:
+    if not settings.database_url.startswith("sqlite"):
+        return
+    inspector = inspect(engine)
+    if "regions" not in inspector.get_table_names():
+        return
+    columns = {column["name"] for column in inspector.get_columns("regions")}
+    if "context_json" in columns:
+        return
+    with engine.begin() as connection:
+        connection.execute(text("ALTER TABLE regions ADD COLUMN context_json JSON"))

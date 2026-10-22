@@ -11,6 +11,12 @@ OBSERVED_COVARIATE_KEYS = {
     "tests",
     "positivity",
     "wastewater_index",
+    "mobility_index",
+    "vaccination_coverage",
+    "prior_infection_estimate",
+    "school_in_session",
+    "public_health_measure_index",
+    "variant_share",
     "value",
 }
 

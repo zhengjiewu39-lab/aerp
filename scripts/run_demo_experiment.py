@@ -30,7 +30,7 @@ def main() -> None:
             {
                 "name": "示例实验-合成演示",
                 "disease_id": "synth-ari",
-                "region_ids": ["R1", "R2", "R3", "R4"],
+                "region_ids": ["R1", "R2", "R3", "R4", "R5"],
                 "target_metric": "hospital_admissions",
                 "replay_mode": "vintage",
                 "cutoff_time": cutoff,
@@ -38,7 +38,19 @@ def main() -> None:
                 "train_window_weeks": 52,
                 "horizons": [1, 2, 3, 4],
                 "random_seed": 42,
-                "models": ["persistence", "fixed_glm", "retrain_glm", "equal_weight", "dynamic_weight", "adaptive"],
+                "holdout_region_ids": ["R5"],
+                "models": [
+                    "persistence",
+                    "fixed_glm",
+                    "retrain_glm",
+                    "pooled_glm",
+                    "hierarchical",
+                    "hierarchical_dynamic",
+                    "equal_weight",
+                    "dynamic_weight",
+                    "adaptive",
+                    "analog",
+                ],
                 "ablations": {"no_revision": False, "no_anomaly": False, "no_dynamic_weight": False},
             },
         )
@@ -50,6 +62,9 @@ def main() -> None:
         print(f"status={finished.status}")
         print(f"experiment_id={finished.id}")
         print(f"export={out}")
+        models = (finished.summary or {}).get("models") or {}
+        for model_id, stats in models.items():
+            print(f"wis[{model_id}]={stats.get('wis')} mae={stats.get('mae')} n={stats.get('n')}")
         if finished.status != "completed":
             print(finished.error_message)
             raise SystemExit(1)
