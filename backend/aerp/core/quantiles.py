@@ -31,6 +31,48 @@ def empirical_predictive_quantiles(
     return ordered_nonnegative(raw)
 
 
+def mix_quantile_average(items: list[dict[float, float]]) -> dict[float, float]:
+    """对应分位数平均。这是一种组合启发式，不是混合分布的分位数。"""
+    if not items:
+        return {}
+    levels = sorted(items[0])
+    mixed = {level: float(np.mean([item[level] for item in items])) for level in levels}
+    return ordered_nonnegative(mixed)
+
+
+def mix_predictive_cdfs(items: list[dict[float, float]], *, n_grid: int = 400) -> dict[float, float]:
+    """等权混合各预测分布的 CDF 后再反演分位数。这才是样本/分布混合。"""
+    if not items:
+        return {}
+    levels = sorted({float(level) for item in items for level in item})
+    lows = [min(item[level] for level in item) for item in items]
+    highs = [max(item[level] for level in item) for item in items]
+    grid = np.linspace(min(lows), max(highs) + 1e-6, int(n_grid))
+
+    def cdf_of(item: dict[float, float], x: float) -> float:
+        xs = np.array([item[level] for level in sorted(item)], dtype=float)
+        ps = np.array(sorted(item), dtype=float)
+        if x <= xs[0]:
+            return float(ps[0])
+        if x >= xs[-1]:
+            return float(ps[-1])
+        return float(np.interp(x, xs, ps))
+
+    mix_cdf = np.mean([[cdf_of(item, float(x)) for item in items] for x in grid], axis=1)
+    mixed = {}
+    for level in levels:
+        mixed[level] = float(np.interp(level, mix_cdf, grid))
+    return ordered_nonnegative(mixed)
+
+
+def empirical_quantiles_from_samples(samples: np.ndarray, levels: tuple[float, ...] = QUANTILE_LEVELS) -> dict[float, float]:
+    values = np.asarray(samples, dtype=float)
+    values = values[np.isfinite(values)]
+    if values.size == 0:
+        return {}
+    return ordered_nonnegative({float(level): float(np.quantile(values, level)) for level in levels})
+
+
 def scale_around_median(quantiles: dict[float, float], scale: float) -> dict[float, float]:
     """适应规则使用的区间宽度倍率。调用方必须在回放里报告实际覆盖率。"""
     median = float(quantiles[0.5])

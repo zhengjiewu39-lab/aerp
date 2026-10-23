@@ -45,6 +45,7 @@ def init_db() -> None:
     Base.metadata.create_all(bind=engine)
     _ensure_region_context_column()
     _ensure_sqlite_column("evaluations", "purpose", "VARCHAR(32) DEFAULT 'final'")
+    _ensure_sqlite_column("evaluations", "split_set", "VARCHAR(32) DEFAULT 'unspecified'")
 
 
 def _ensure_region_context_column() -> None:

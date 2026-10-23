@@ -52,6 +52,9 @@ class ForecastTask:
     reference_week_end: pd.Timestamp
     horizons: tuple[int, ...]
     rule: str = "saturday_on_or_before_cutoff"
+    disease_id: str | None = None
+    region_id: str | None = None
+    target: str | None = None
 
     @property
     def reference_week_start(self) -> pd.Timestamp:
@@ -87,6 +90,9 @@ class ForecastTask:
                 str(horizon): stamp.date().isoformat() for horizon, stamp in self.target_week_ends().items()
             },
             "rule": self.rule,
+            "disease_id": self.disease_id,
+            "region_id": self.region_id,
+            "target": self.target,
             "definitions": dict(CALENDAR_DEFINITIONS),
         }
         if last_visible is not None:
@@ -103,6 +109,9 @@ def build_forecast_task(
     *,
     rule: str = "saturday_on_or_before_cutoff",
     week_grid=None,
+    disease_id: str | None = None,
+    region_id: str | None = None,
+    target: str | None = None,
 ) -> ForecastTask:
     cutoff_ts = as_timestamp(cutoff)
     if week_grid is not None:
@@ -118,6 +127,9 @@ def build_forecast_task(
             reference_week_end=reference,
             horizons=tuple(int(item) for item in horizons),
             rule=f"{rule}|data_grid",
+            disease_id=disease_id,
+            region_id=region_id,
+            target=target,
         )
     if rule == "saturday_on_or_before_cutoff":
         reference = saturday_on_or_before(cutoff_ts)
@@ -134,4 +146,7 @@ def build_forecast_task(
         reference_week_end=reference,
         horizons=tuple(int(item) for item in horizons),
         rule=rule,
+        disease_id=disease_id,
+        region_id=region_id,
+        target=target,
     )

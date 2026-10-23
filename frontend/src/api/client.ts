@@ -23,7 +23,8 @@ export const api = {
   health: () => request<any>("/api/health"),
   meta: () => request<any>("/api/meta"),
   diseases: () => request<any[]>("/api/diseases"),
-  regions: () => request<any[]>("/api/regions"),
+  regions: (diseaseId?: string) =>
+    request<any[]>(diseaseId ? `/api/regions?disease_id=${encodeURIComponent(diseaseId)}` : "/api/regions"),
   sources: () => request<any[]>("/api/sources"),
   connectors: () => request<any[]>("/api/connectors"),
   models: () => request<any>("/api/models"),
@@ -35,11 +36,20 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }),
-  overview: (diseaseId: string, regionId: string, cutoff?: string) => {
+  overview: (diseaseId: string, regionId: string, cutoff?: string, metric?: string) => {
     const q = new URLSearchParams({ disease_id: diseaseId, region_id: regionId });
     if (cutoff) q.set("cutoff", cutoff);
+    if (metric) q.set("metric", metric);
     return request<any>(`/api/overview?${q}`);
   },
+  recommend: (diseaseId: string, target?: string) => {
+    const q = new URLSearchParams({ disease_id: diseaseId });
+    if (target) q.set("target", target);
+    return request<any>(`/api/recommend?${q}`);
+  },
+  transferDemo: () => request<any>("/api/transfer/demo"),
+  dengueStatus: () => request<any>("/api/dengue/status"),
+  seedMeasles: () => request<any>("/api/demo/seed-measles?force=true", { method: "POST" }),
   imports: () => request<any[]>("/api/imports"),
   completeness: (diseaseId: string, regionId: string) =>
     request<any>(`/api/completeness?disease_id=${encodeURIComponent(diseaseId)}&region_id=${encodeURIComponent(regionId)}`),

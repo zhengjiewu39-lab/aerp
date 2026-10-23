@@ -371,6 +371,20 @@ export function Experiments() {
                   </tbody>
                 </table>
               </div>
+              {detail.summary?.models_locked_test ? (
+                <div className="rounded-xl border border-slate-200 px-3 py-2">
+                  <div className="font-medium">锁定测试主结果（{detail.summary.primary_split}）</div>
+                  <ul className="mt-2 space-y-1 text-xs text-slate-600">
+                    {Object.entries(detail.summary.models_locked_test).map(([modelId, row]: any) => (
+                      <li key={modelId}>
+                        {modelId} · n {row.n} · WIS {row.wis?.toFixed?.(2) ?? "暂无"}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : (
+                <p className="text-xs text-slate-500">尚无锁定测试划分时，不把全部评分当作已锁定主结果。</p>
+              )}
               {detail.summary?.alert_skill ? (
                 <div className="rounded-xl border border-slate-200 px-3 py-2">
                   预警精确率 {detail.summary.alert_skill.precision?.toFixed?.(2) ?? "—"} · 召回率 {detail.summary.alert_skill.recall?.toFixed?.(2) ?? "—"}

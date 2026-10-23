@@ -250,7 +250,7 @@ def run_vintage_replay(
                 (pd.to_datetime(obs["period_end"]) >= pd.to_datetime(development["start"]))
                 & (pd.to_datetime(obs["period_end"]) <= pd.to_datetime(development["end"]))
             ]
-            thresholds = development_thresholds(dev_rows)
+            thresholds = development_thresholds(dev_rows, freeze_time=development["end"])
         write_json(run_dir, "thresholds.json", {"thresholds": thresholds, "source": "development_quantile_0.90"})
         joint = evaluate_joint_alerts(
             _forecast_rows(exported),

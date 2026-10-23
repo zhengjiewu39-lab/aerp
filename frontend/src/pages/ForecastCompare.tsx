@@ -4,6 +4,7 @@ import { ChartPanel } from "../components/ChartPanel";
 import { EmptyState } from "../components/EmptyState";
 import { Loading } from "../components/Loading";
 import { StatusBadge } from "../components/StatusBadge";
+import { useWorkspace } from "../workspace";
 
 const MODEL_COLORS: Record<string, string> = {
   persistence: "#6b7280",
@@ -29,13 +30,17 @@ export function ForecastCompare() {
   const [summary, setSummary] = useState<any>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
+  const [selectedModel, setSelectedModel] = useState("adaptive");
+  const [band, setBand] = useState<"50" | "80" | "95">("80");
+  const { diseaseId } = useWorkspace();
 
   useEffect(() => {
     Promise.all([api.experiments(), api.regions()])
       .then(([exps, regs]) => {
         setExperiments(exps);
         setRegions(regs);
-        const preferred = exps.find((item: any) => item.status === "completed") || exps[0];
+        const filtered = diseaseId ? exps.filter((item: any) => item.disease_id === diseaseId) : exps;
+        const preferred = filtered.find((item: any) => item.status === "completed") || filtered[0] || exps[0];
         setExperimentId(preferred?.id || "");
         setRegionId(preferred?.region_ids?.[0] || regs[0]?.id || "");
       })
@@ -59,7 +64,10 @@ export function ForecastCompare() {
   const curveOption = useMemo(() => {
     const rows = forecasts.filter((row) => row.horizon === 1);
     if (!rows.length) return undefined;
-    const models = Array.from(new Set(rows.map((row) => row.model_id)));
+      const models = Array.from(new Set(rows.map((row) => row.model_id)));
+      if (models.length && !models.includes(selectedModel)) {
+        /* keep current selection even if missing on this cutoff */
+      }
     const dates = Array.from(new Set(rows.map((row) => row.target_period_end))).sort();
     const actualByDate = new Map<string, number | null>();
     for (const row of evaluations) {
@@ -77,6 +85,7 @@ export function ForecastCompare() {
           name: model,
           type: "line",
           itemStyle: { color: MODEL_COLORS[model] || "#333" },
+          lineStyle: { width: model === selectedModel ? 2.5 : 1, opacity: model === selectedModel ? 1 : 0.35 },
           data: dates.map((date) => rows.find((row) => row.model_id === model && row.target_period_end === date)?.median ?? null),
         })),
         {
@@ -88,32 +97,31 @@ export function ForecastCompare() {
         },
       ],
     };
-  }, [forecasts, evaluations]);
+  }, [forecasts, evaluations, selectedModel]);
 
   const fanOption = useMemo(() => {
     if (!forecasts.length) return undefined;
     const cutoffs = [...forecasts].map((row) => row.cutoff_time).sort();
     const latestCutoff = cutoffs.length ? cutoffs[cutoffs.length - 1] : null;
-    const latest = forecasts.filter((row) => row.cutoff_time === latestCutoff && row.model_id === "adaptive");
+    const preferred = forecasts.filter((row) => row.cutoff_time === latestCutoff && row.model_id === selectedModel);
+    const latest = preferred.length ? preferred : forecasts.filter((row) => row.cutoff_time === latestCutoff);
     if (!latest.length) return undefined;
     const ordered = [...latest].sort((a, b) => a.horizon - b.horizon);
+    const low = ordered.map((row) => (row as any)[`interval_${band}`]?.[0]);
+    const high = ordered.map((row) => (row as any)[`interval_${band}`]?.[1]);
     return {
       tooltip: { trigger: "axis" },
-      legend: { data: ["中位数", "50% 下界", "50% 上界", "80% 下界", "80% 上界", "95% 下界", "95% 上界"] },
-      grid: { left: 48, right: 20, top: 48, bottom: 40 },
+      legend: { data: ["观测/中位数", `${band}% 区间`] },
+      grid: { left: 52, right: 20, top: 48, bottom: 40 },
       xAxis: { type: "category", data: ordered.map((row) => `${row.horizon}周`) },
-      yAxis: { type: "value", name: "预测范围" },
+      yAxis: { type: "value", name: "预测区间" },
       series: [
-        { name: "中位数", type: "line", data: ordered.map((row) => row.median), itemStyle: { color: "#102a33" } },
-        { name: "50% 下界", type: "line", data: ordered.map((row) => row.interval_50?.[0]), lineStyle: { type: "dashed", color: "#1f6f78" }, symbol: "none" },
-        { name: "50% 上界", type: "line", data: ordered.map((row) => row.interval_50?.[1]), lineStyle: { type: "dashed", color: "#1f6f78" }, symbol: "none" },
-        { name: "80% 下界", type: "line", data: ordered.map((row) => row.interval_80?.[0]), lineStyle: { type: "dotted", color: "#6b7280" }, symbol: "none" },
-        { name: "80% 上界", type: "line", data: ordered.map((row) => row.interval_80?.[1]), lineStyle: { type: "dotted", color: "#6b7280" }, symbol: "none" },
-        { name: "95% 下界", type: "line", data: ordered.map((row) => row.interval_95?.[0]), lineStyle: { type: "dotted", color: "#9ca3af" }, symbol: "none" },
-        { name: "95% 上界", type: "line", data: ordered.map((row) => row.interval_95?.[1]), lineStyle: { type: "dotted", color: "#9ca3af" }, symbol: "none" },
+        { name: "观测/中位数", type: "line", data: ordered.map((row) => row.median), itemStyle: { color: "#0f2740" } },
+        { name: `${band}% 下界`, type: "line", data: low, lineStyle: { type: "dashed", color: "#1f7a78" }, symbol: "none" },
+        { name: `${band}% 上界`, type: "line", data: high, lineStyle: { type: "dashed", color: "#1f7a78" }, symbol: "none" },
       ],
     };
-  }, [forecasts]);
+  }, [forecasts, selectedModel, band]);
 
   const weights = useMemo(() => {
     const cutoffs = [...forecasts].map((row) => row.cutoff_time).sort();
@@ -142,7 +150,7 @@ export function ForecastCompare() {
 
   return (
     <div className="space-y-5">
-      <section className="grid gap-4 rounded-2xl border border-slate-200/80 bg-white/80 p-4 md:grid-cols-2">
+      <section className="card grid gap-4 md:grid-cols-4">
         <label className="text-sm">
           <div className="mb-1 text-slate-500">实验</div>
           <select className="w-full rounded-lg border border-slate-300 px-3 py-2" value={experimentId} onChange={(e) => setExperimentId(e.target.value)}>
@@ -155,12 +163,30 @@ export function ForecastCompare() {
         </label>
         <label className="text-sm">
           <div className="mb-1 text-slate-500">地区</div>
-          <select className="w-full rounded-lg border border-slate-300 px-3 py-2" value={regionId} onChange={(e) => setRegionId(e.target.value)}>
+          <select className="field" value={regionId} onChange={(e) => setRegionId(e.target.value)}>
             {regions.map((item) => (
               <option key={item.id} value={item.id}>
                 {item.name}
               </option>
             ))}
+          </select>
+        </label>
+        <label className="text-sm">
+          <div className="mb-1 text-slate-500">突出模型</div>
+          <select className="field" value={selectedModel} onChange={(e) => setSelectedModel(e.target.value)}>
+            {Array.from(new Set(forecasts.map((row) => row.model_id))).map((item) => (
+              <option key={item} value={item}>
+                {item}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="text-sm">
+          <div className="mb-1 text-slate-500">区间</div>
+          <select className="field" value={band} onChange={(e) => setBand(e.target.value as "50" | "80" | "95")}>
+            <option value="50">50%</option>
+            <option value="80">80%</option>
+            <option value="95">95%</option>
           </select>
         </label>
       </section>
@@ -200,7 +226,8 @@ export function ForecastCompare() {
         </section>
         <section className="rounded-2xl border border-slate-200/80 bg-white/80 p-4">
           <h3 className="font-display text-lg">模型评分摘要</h3>
-          <p className="mt-1 text-sm text-slate-600">WIS 越低越好。待评价 {pendingCount} 条。</p>
+          <p className="mt-1 text-sm text-slate-600">WIS 越低越好。待评价 {pendingCount} 条，未成熟不显示虚假误差。主结果看锁定测试。</p>
+          {summary?.primary_split ? <p className="text-xs text-slate-500">主划分：{summary.primary_split}</p> : null}
           <div className="mt-3 overflow-x-auto">
             <table className="min-w-full text-left text-sm">
               <thead>
@@ -318,8 +345,8 @@ export function ForecastCompare() {
                   <td className="py-2 pr-3">
                     <StatusBadge status={row.status === "pending" ? "pending" : "scored"} />
                   </td>
-                  <td className="py-2 pr-3">{row.actual_value ?? "—"}</td>
-                  <td className="py-2 pr-3">{row.wis?.toFixed?.(2) ?? "—"}</td>
+                    <td className="py-2 pr-3">{row.status === "pending" ? "待评价" : row.actual_value ?? "暂无"}</td>
+                    <td className="py-2 pr-3">{row.status === "pending" ? "待评价" : row.wis?.toFixed?.(2) ?? "暂无"}</td>
                   <td className="py-2 pr-3">{row.phase}</td>
                 </tr>
               ))}

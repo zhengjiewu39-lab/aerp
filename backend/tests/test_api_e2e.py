@@ -170,3 +170,30 @@ def test_ablation_suite_compares_without_forced_winner(client: TestClient):
         assert "comparison" in result
         assert "不默认优于" in result["comparison"]["note"] or "真实回放" in result["comparison"]["note"]
         assert all(item["status"] in {"completed", "failed"} for item in result["variants"])
+
+
+def test_disease_registry_and_measles_isolation(client: TestClient):
+    diseases = client.get("/api/diseases")
+    assert diseases.status_code == 200
+    rows = diseases.json()
+    by_id = {item["id"]: item for item in rows}
+    assert "influenza" in by_id
+    assert "covid19" in by_id
+    assert "measles" in by_id
+    assert by_id["measles"]["status"] == "demo_only"
+    assert by_id["dengue"]["status"] == "pending"
+    seeded = client.post("/api/demo/seed-measles?force=true")
+    assert seeded.status_code == 200
+    measles_regions = client.get("/api/regions", params={"disease_id": "measles"})
+    flu_regions = client.get("/api/regions", params={"disease_id": "synth-ari"})
+    measles_ids = {item["id"] for item in measles_regions.json()}
+    flu_ids = {item["id"] for item in flu_regions.json()}
+    assert measles_ids and measles_ids.isdisjoint(flu_ids)
+    overview = client.get("/api/overview", params={"disease_id": "measles", "region_id": "M1"})
+    assert overview.status_code == 200
+    assert overview.json()["metric"] == "weekly_cases"
+    transfer = client.get("/api/transfer/demo")
+    assert transfer.status_code == 200
+    body = transfer.json()
+    assert body["data_mode"] == "synthetic_stress_test"
+    assert body["models"]["transfer_local"]["n"] > 0

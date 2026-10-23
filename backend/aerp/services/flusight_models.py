@@ -349,3 +349,37 @@ def fetch_and_score_baselines(
     scored["errors"] = errors
     scored["n_files"] = len(parsed_rows)
     return scored
+
+
+def paired_common_tasks(internal_rows: list[dict], external_rows: list[dict]) -> dict:
+    """只在共同地区、目标周、时长上配对。日期对不上时不拿其他日期替代。"""
+    def key(row: dict) -> tuple:
+        return (
+            str(row.get("region_id")),
+            str(row.get("target_period_end"))[:10],
+            int(row.get("horizon") or 0),
+        )
+
+    left = {key(row): row for row in internal_rows if row.get("horizon") not in (None, "")}
+    right = {key(row): row for row in external_rows if row.get("horizon") not in (None, "")}
+    common = sorted(set(left) & set(right))
+    if not common:
+        return {
+            "status": "incomplete",
+            "message": "没有共同任务可配对。不使用邻近日期替代成绩。",
+            "n_internal": len(left),
+            "n_external": len(right),
+            "n_common": 0,
+        }
+    internal_wis = np.array([float(left[item]["wis"]) for item in common], dtype=float)
+    external_wis = np.array([float(right[item]["wis"]) for item in common], dtype=float)
+    return {
+        "status": "success",
+        "n_common": len(common),
+        "n_internal": len(left),
+        "n_external": len(right),
+        "internal_wis": float(np.mean(internal_wis)),
+        "external_wis": float(np.mean(external_wis)),
+        "mean_diff_internal_minus_external": float(np.mean(internal_wis - external_wis)),
+        "note": "仅共同任务。样本数不同时不得把外部全季平均拿来与本系统全原点比较。",
+    }

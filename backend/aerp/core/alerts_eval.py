@@ -23,12 +23,55 @@ class AlertTask:
     threshold_quantile: float = 0.90
 
 
-def development_thresholds(frame: pd.DataFrame, *, region_col="region_id", value_col="value", q=0.90) -> dict[str, float]:
-    thresholds = {}
+def freeze_one_vintage(
+    frame: pd.DataFrame,
+    *,
+    freeze_time,
+    region_col="region_id",
+    period_col="period_end",
+    issued_col="issued_at",
+    value_col="value",
+) -> pd.DataFrame:
+    """每个地区每个周期只用 freeze_time 及之前最后一次发布的版本。后续修订不回写早期阈值。"""
     work = frame.copy()
+    if issued_col not in work.columns:
+        work = work.dropna(subset=[value_col])
+        return work.drop_duplicates([region_col, period_col], keep="last")
+    work[period_col] = pd.to_datetime(work[period_col])
+    work[issued_col] = pd.to_datetime(work[issued_col])
+    freeze = pd.Timestamp(freeze_time)
+    visible = work.loc[work[issued_col] <= freeze].copy()
+    visible = visible.sort_values([region_col, period_col, issued_col])
+    return visible.drop_duplicates([region_col, period_col], keep="last")
+
+
+def development_thresholds(
+    frame: pd.DataFrame,
+    *,
+    region_col="region_id",
+    value_col="value",
+    q=0.90,
+    freeze_time=None,
+    issued_col="issued_at",
+    period_col="period_end",
+) -> dict[str, float]:
+    work = frame.copy()
+    if freeze_time is not None:
+        work = freeze_one_vintage(
+            work,
+            freeze_time=freeze_time,
+            region_col=region_col,
+            period_col=period_col,
+            issued_col=issued_col,
+            value_col=value_col,
+        )
     work[value_col] = pd.to_numeric(work[value_col], errors="coerce")
+    thresholds = {}
     for region_id, group in work.groupby(region_col):
-        values = group[value_col].dropna().to_numpy(dtype=float)
+        subset = group
+        if period_col in subset.columns:
+            subset = subset.drop_duplicates([period_col], keep="last")
+        values = subset[value_col].dropna().to_numpy(dtype=float)
         if values.size < 12:
             continue
         thresholds[str(region_id)] = float(np.quantile(values, q))
@@ -158,11 +201,14 @@ def event_lead_time(flags: list[tuple[pd.Timestamp, bool]], truth: list[tuple[pd
         events.append({"start": event_start, "end": None})
     leads = []
     for event in events:
-        first_alert = None
-        for stamp, alert in flags:
-            if as_timestamp(stamp) <= event["start"] and alert:
-                first_alert = as_timestamp(stamp)
-                break
+        window = [
+            as_timestamp(stamp)
+            for stamp, alert in flags
+            if alert
+            and as_timestamp(stamp) <= event["start"]
+            and (event["start"] - as_timestamp(stamp)).days / 7.0 <= 6
+        ]
+        first_alert = min(window) if window else None
         if first_alert is None:
             leads.append({"event_start": event["start"], "lead_weeks": None, "detected": False})
         else:
@@ -185,6 +231,7 @@ def evaluate_joint_alerts(
     rho: float = 0.65,
     seed: int = 42,
     event_horizons: tuple[int, ...] = (1, 2),
+    rho_grid: tuple[float, ...] = (0.0, 0.35, 0.65, 0.9),
 ) -> dict:
     """按 (model, region, cutoff) 估计两周联合超阈概率并对照已实现结果。"""
     from aerp.core.trajectories import sample_copula_trajectories
@@ -266,6 +313,33 @@ def evaluate_joint_alerts(
     probs = np.array([row["probability"] for row in scored], dtype=float)
     outcomes = np.array([row["outcome"] for row in scored], dtype=float)
     methods = sorted({row["method"] for row in records})
+    by_model = {}
+    for model_id in sorted({row["model_id"] for row in scored}):
+        subset = [row for row in scored if row["model_id"] == model_id]
+        p = np.array([row["probability"] for row in subset], dtype=float)
+        y = np.array([row["outcome"] for row in subset], dtype=float)
+        by_model[model_id] = {
+            "n": len(subset),
+            "brier": brier_score(p, y),
+            "reliability": reliability_bins(p, y),
+        }
+    sensitivity = []
+    if scored and rho_grid:
+        for alt in rho_grid:
+            if abs(float(alt) - float(rho)) < 1e-9:
+                continue
+            alt_eval = evaluate_joint_alerts(
+                forecast_rows,
+                thresholds=thresholds,
+                actuals=actuals,
+                sample_tables=sample_tables,
+                n_samples=n_samples,
+                rho=float(alt),
+                seed=seed,
+                event_horizons=event_horizons,
+                rho_grid=(),
+            )
+            sensitivity.append({"rho": float(alt), "brier": alt_eval.get("brier"), "n_scored": alt_eval.get("n_scored")})
     return {
         "status": "success" if records else "skipped",
         "event_definition": EVENT_DEFINITION,
@@ -275,6 +349,9 @@ def evaluate_joint_alerts(
         "degraded_share": None if not records else float(np.mean([row["degraded"] for row in records])),
         "brier": None if not scored else brier_score(probs, outcomes),
         "reliability": reliability_bins(probs, outcomes) if scored else [],
+        "by_model": by_model,
+        "rho": rho,
+        "rho_sensitivity": sensitivity,
         "rows": records[:200],
-        "note": "联合概率默认来自高斯 copula 轨迹；仅当轨迹不可用时才使用独立边际并标记 degraded。",
+        "note": "按模型分别计算 Brier 与可靠性。联合概率默认来自高斯 copula；无轨迹时独立边际并标记 degraded。相关性假设用 rho 网格做敏感性，不把某一次 rho 当作已验证事实。",
     }

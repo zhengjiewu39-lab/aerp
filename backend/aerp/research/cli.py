@@ -12,7 +12,10 @@ from aerp.research.archive import ARCHIVE_NOTE, archive_forecast, attach_externa
 from aerp.research.replay import run_vintage_replay
 from aerp.research.runs import incomplete_artifacts, start_run, write_json, write_text
 from aerp.research.splits import infer_splits
-from aerp.services.delphi import verify_delphi
+from aerp.research.nhsn_replay import run_nhsn_replay
+from aerp.research.transfer_run import generate_paired_respiratory, run_transfer_comparison
+from aerp.services.delphi import fetch_nhsn_weekly, verify_delphi
+from aerp.services.dengue import check_dengue_sources
 from aerp.services.flusight import DEFAULT_RESEARCH_LOCATIONS, fetch_flusight_target, observations_from_flusight
 from aerp.services.flusight_models import fetch_and_score_baselines, fetch_hub_forecast, quantile_forecasts
 
@@ -20,7 +23,7 @@ from aerp.services.flusight_models import fetch_and_score_baselines, fetch_hub_f
 def _print(payload: dict) -> int:
     print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
     status = payload.get("status")
-    return 0 if status in {None, "success", "saved", "exists", "incomplete", "degraded", "verified", "ok", "local_only", "skipped"} else 1
+    return 0 if status in {None, "success", "saved", "exists", "incomplete", "degraded", "verified", "ok", "local_only", "skipped", "completed"} else 1
 
 
 def cmd_fetch(args: argparse.Namespace) -> int:
@@ -166,7 +169,7 @@ def cmd_thresholds(args: argparse.Namespace) -> int:
     if not dev:
         return _print({"status": "error", "message": "没有开发集，不能按测试结果选择预警阈值。"})
     subset = rows[(rows["period_end"] >= dev["start"]) & (rows["period_end"] <= dev["end"])]
-    thresholds = development_thresholds(subset)
+    thresholds = development_thresholds(subset, freeze_time=dev["end"])
     return _print(
         {
             "status": "success",
@@ -196,6 +199,50 @@ def cmd_baselines(args: argparse.Namespace) -> int:
         models=[args.model],
     )
     return _print(result)
+
+
+def cmd_fetch_nhsn(args: argparse.Namespace) -> int:
+    parsed = fetch_nhsn_weekly(
+        args.disease,
+        geo_value=args.geo_value,
+        time_values=args.time_values,
+        cache_dir=Path(args.cache_dir) if args.cache_dir else None,
+    )
+    if parsed.get("status") == "success":
+        parsed = dict(parsed)
+        rows = parsed.get("rows")
+        parsed["n_rows"] = 0 if rows is None else int(len(rows))
+        parsed["rows"] = "omitted_from_cli_stdout"
+    return _print(parsed)
+
+
+def cmd_check_dengue(args: argparse.Namespace) -> int:
+    return _print(check_dengue_sources(live=bool(args.live)))
+
+
+def cmd_nhsn_replay(args: argparse.Namespace) -> int:
+    return _print(
+        run_nhsn_replay(
+            args.disease,
+            geo_value=args.geo_value,
+            time_values=args.time_values,
+            seed=args.seed,
+            max_origins=args.max_origins,
+        )
+    )
+
+
+def cmd_transfer_demo(args: argparse.Namespace) -> int:
+    del args
+    frames = generate_paired_respiratory()
+    return _print(
+        run_transfer_comparison(
+            frames["synth-covid-hosp"],
+            {"synth-flu-hosp": frames["synth-flu-hosp"]},
+            target_disease_id="synth-covid-hosp",
+            region_id="PA",
+        )
+    )
 
 
 def cmd_change_labels(args: argparse.Namespace) -> int:
@@ -275,6 +322,28 @@ def build_parser() -> argparse.ArgumentParser:
     labels.add_argument("--file")
     labels.add_argument("--source", choices=["none", "synthetic", "manual"], default="none")
     labels.set_defaults(func=cmd_change_labels)
+
+    nhsn = sub.add_parser("fetch-nhsn", help="按病种拉取 Delphi NHSN 周住院（流感/COVID/RSV 独立信号）")
+    nhsn.add_argument("--disease", choices=["influenza", "covid19", "rsv"], required=True)
+    nhsn.add_argument("--geo-value", default="pa")
+    nhsn.add_argument("--time-values", default="202240-202520")
+    nhsn.add_argument("--cache-dir")
+    nhsn.set_defaults(func=cmd_fetch_nhsn)
+
+    dengue = sub.add_parser("check-dengue", help="核查登革热候选来源，不伪造病例")
+    dengue.add_argument("--live", action="store_true")
+    dengue.set_defaults(func=cmd_check_dengue)
+
+    transfer = sub.add_parser("transfer-demo", help="合成呼吸道住院上比较本地/固定迁移/可退出迁移")
+    transfer.set_defaults(func=cmd_transfer_demo)
+
+    nhsn_replay = sub.add_parser("nhsn-replay", help="导入 Delphi NHSN 并跑指定病种的小范围回放")
+    nhsn_replay.add_argument("--disease", choices=["influenza", "covid19", "rsv"], required=True)
+    nhsn_replay.add_argument("--geo-value", default="pa")
+    nhsn_replay.add_argument("--time-values", default="202240-202520")
+    nhsn_replay.add_argument("--seed", type=int, default=42)
+    nhsn_replay.add_argument("--max-origins", type=int, default=6)
+    nhsn_replay.set_defaults(func=cmd_nhsn_replay)
     return parser
 
 

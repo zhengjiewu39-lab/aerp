@@ -36,10 +36,17 @@ export function Alerts() {
 
   if (loading) return <Loading />;
   if (error) return <EmptyState title="异常详情加载失败" detail={error} />;
-  if (!alerts.length) return <EmptyState title="暂无异常记录" detail="运行实验回放后，这里会显示可解释的触发规则与证据。" />;
 
   return (
     <div className="space-y-4">
+      <section className="card">
+        <h2 className="font-display text-xl">可靠性与异常</h2>
+        <p className="mt-2 text-sm text-slate-600">
+          数据修订、模型误差和模型分歧分开展示。人工核实状态可更新。不把规则触发写成“真实传播机制已变化”。
+        </p>
+        <p className="mt-2 text-xs text-slate-500">可靠性证据不合成未经校准的准确率百分比。被暂缓任务仍计入完成率。</p>
+      </section>
+      {!alerts.length ? <EmptyState title="暂无异常记录" detail="运行实验回放后，这里会显示可解释的触发规则与证据。" /> : null}
       {alerts.map((alert) => (
         <article key={alert.id} className="rounded-2xl border border-slate-200/80 bg-white/80 p-4">
           <div className="flex flex-wrap items-center gap-2">

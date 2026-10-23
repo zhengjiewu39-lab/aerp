@@ -1,6 +1,6 @@
 # Adaptive Epidemic Research Platform（AERP）
 
-流行病学研究原型，用于比较历史资料、接入地区级周监测版本、估计报告不完整程度、预测未来 1—4 周住院人数，并在识别数据/趋势变化后再更新候选模型。
+流行病学研究原型，用于管理多病种监测数据、比较历史资料、估计报告不完整程度、预测未来 1—4 周住院或病例，并在识别数据/趋势变化后再更新候选模型。
 
 **研究问题：** 在监测数据修订或疫情趋势突然变化时，先识别变化类型再更新模型，是否比直接在线更新更可靠？
 
@@ -48,13 +48,13 @@ docker compose up --build
 
 启动后默认自动写入固定种子合成数据（`AERP_AUTO_SEED=true`）。
 
-1. 打开「总览」：查看合成演示横幅、地区与人群画像、地区趋势、数据可信程度。
-2. 「数据管理」：下载 CSV 模板，或点击重新生成合成数据。
-3. 「实验工作台」：创建并启动历史版本回放；或点「一键运行消融对照」比较删修订/删异常/删动态权重。
-4. 「预测比较」：查看历史预测与成熟实际值、最新预测范围、权重、分层对照与 WIS/MAE。
-5. 「异常详情」：查看触发规则、支持/冲突证据，并更新人工核实状态。
-6. 「总览」可查看修订轨迹（同一周期不同发布时间）。
-7. 导出实验结果 JSON（含配置哈希、输入数据哈希、依赖版本）。
+1. 打开「多病种总览」：顶部选择疾病/目标/地区，查看真实或合成状态，不填假数字。
+2. 「疾病研究」：传播机制、数据来源、候选模型理由、可训练与资料分区。
+3. 「数据管理」：CSV 模板、麻疹合成示例、连接器真实状态。
+4. 「研究实验」：创建回放；开发/验证/锁定测试分开报告。
+5. 「预测比较」：观测、成熟目标与区间；未成熟标待评价。
+6. 「跨疾病迁移」：本地 / 固定迁移 / 可退出迁移对照（默认合成压力测试）。
+7. 「可靠性与异常」：修订、误差、分歧与人工核实；不显示未经验证的机制已变化。
 
 命令行示例实验：
 
@@ -95,6 +95,9 @@ uv run python -m aerp.research inventory --kind vintage
 uv run python -m aerp.research splits --kind vintage
 uv run python -m aerp.research replay --kind vintage --run-experiment --seed 42
 uv run python -m aerp.research verify-delphi
+uv run python -m aerp.research fetch-nhsn --disease covid19 --geo-value pa
+uv run python -m aerp.research check-dengue
+uv run python -m aerp.research transfer-demo
 uv run python -m aerp.research archive-verify
 ```
 
@@ -122,6 +125,7 @@ cd frontend && npm run typecheck && npm run build
 
 - [方法说明](docs/METHODS.md)
 - [功能状态与局限](docs/STATUS.md)
+- [多病种状态与复现](docs/MULTI_DISEASE.md)
 
 ## 许可与伦理边界
 

@@ -4,9 +4,9 @@ export default {
   theme: {
     extend: {
       colors: {
-        ink: "#102a33",
-        mist: "#eef5f4",
-        sea: "#1f6f78",
+        ink: "#0f2740",
+        mist: "#eef1f4",
+        sea: "#1f7a78",
         sand: "#d9c3a2",
         alert: "#9a4a3a",
       },
@@ -15,7 +15,7 @@ export default {
         sans: ['"IBM Plex Sans"', "Segoe UI", "sans-serif"],
       },
       boxShadow: {
-        soft: "0 10px 30px rgba(16, 42, 51, 0.08)",
+        card: "0 1px 2px rgba(15, 39, 64, 0.06), 0 8px 24px rgba(15, 39, 64, 0.04)",
       },
     },
   },

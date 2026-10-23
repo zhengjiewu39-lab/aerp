@@ -53,6 +53,13 @@ CONNECTORS = [
         "url": "https://github.com/cmu-delphi/DelphiRF",
         "note": "研究扩展接口预留。第一版未配置。",
     },
+    {
+        "id": "dengue_paho",
+        "name": "登革热来源核查（PAHO/WHO）",
+        "status": "unverified",
+        "url": "https://www3.paho.org/data/index.php/en/mnu-topics/indicadores-dengue-en.html",
+        "note": "适配接口已就绪。尚未确认可再分发周病例修订版本，不伪造数据。",
+    },
 ]
 
 STATUS_LABELS = {
@@ -70,6 +77,12 @@ def list_connectors() -> list[dict]:
         row = dict(item)
         if row["id"] == "delphi_epidata":
             row.update(delphi_status())
+        if row["id"] == "dengue_paho":
+            from aerp.services.dengue import adapter_status
+
+            dengue = adapter_status()
+            row["note"] = dengue.get("message") or row["note"]
+            row["status"] = dengue.get("status") or row["status"]
         row["status_label"] = STATUS_LABELS.get(row["status"], row["status"])
         items.append(row)
     return items

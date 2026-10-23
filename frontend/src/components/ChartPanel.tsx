@@ -11,13 +11,24 @@ export function ChartPanel({
   height?: number;
   empty?: string;
 }) {
+  const merged = option
+    ? {
+        toolbox: {
+          feature: {
+            dataZoom: { title: { zoom: "缩放", back: "还原" } },
+            saveAsImage: { title: "导出", name: title },
+          },
+        },
+        ...option,
+      }
+    : undefined;
   return (
-    <section className="rounded-2xl border border-slate-200/80 bg-white/80 p-4 shadow-sm backdrop-blur">
+    <section className="card">
       <h3 className="mb-3 font-display text-lg text-ink">{title}</h3>
-      {!option ? (
-        <div className="flex h-40 items-center justify-center text-sm text-slate-500">{empty || "暂无数据"}</div>
+      {!merged ? (
+        <div className="flex h-40 items-center justify-center text-sm text-slate-500">{empty || "暂无"}</div>
       ) : (
-        <ReactECharts option={option} style={{ height }} notMerge lazyUpdate />
+        <ReactECharts option={merged} style={{ height }} notMerge lazyUpdate />
       )}
     </section>
   );

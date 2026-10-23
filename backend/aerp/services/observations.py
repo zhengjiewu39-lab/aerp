@@ -7,6 +7,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from aerp.core.analogs import match_values
+from aerp.core.diseases import DISEASE_SPECS, get_disease
+from aerp.core.recommend import recommend_models
 from aerp.core.context import public_context
 from aerp.core.disclaimer import EMPTY_BANNER, IMPORTED_BANNER, SYNTHETIC_BANNER
 from aerp.core.revision import estimate_revision, nowcast_interval
@@ -118,10 +120,53 @@ def data_mode_banner(db: Session) -> dict:
 
 
 def list_diseases(db: Session) -> list[dict]:
-    return [
-        {"id": row.id, "name": row.name, "description": row.description, "is_synthetic": row.is_synthetic}
-        for row in db.scalars(select(Disease)).all()
-    ]
+    coverage = {}
+    frame = observations_frame(db)
+    if not frame.empty:
+        grouped = frame.groupby("disease_id")
+        for disease_id, group in grouped:
+            coverage[str(disease_id)] = {
+                "n_rows": int(len(group)),
+                "n_regions": int(group["region_id"].nunique()),
+                "metrics": sorted({str(item) for item in group["metric"].dropna().unique()}),
+                "start": pd.to_datetime(group["period_end"]).min().date().isoformat(),
+                "end": pd.to_datetime(group["period_end"]).max().date().isoformat(),
+                "updated_at": pd.to_datetime(group["issued_at"]).max().isoformat(sep=" ", timespec="seconds"),
+            }
+    items = []
+    seen = set()
+    for spec in DISEASE_SPECS.values():
+        seen.add(spec.disease_id)
+        row = db.get(Disease, spec.disease_id)
+        payload = spec.as_dict()
+        payload.update(
+            {
+                "id": spec.disease_id,
+                "name": spec.name_zh,
+                "description": row.description if row else spec.notes,
+                "is_synthetic": spec.is_synthetic,
+                "coverage": coverage.get(spec.disease_id),
+                "recommendation": recommend_models(spec.disease_id, n_weeks=coverage.get(spec.disease_id, {}).get("n_rows", 0)),
+            }
+        )
+        items.append(payload)
+    for row in db.scalars(select(Disease)).all():
+        if row.id in seen:
+            continue
+        items.append(
+            {
+                "id": row.id,
+                "disease_id": row.id,
+                "name": row.name,
+                "name_zh": row.name,
+                "description": row.description,
+                "is_synthetic": row.is_synthetic,
+                "status": "pending",
+                "status_label": "数据库中有记录，注册表尚未收录",
+                "coverage": coverage.get(row.id),
+            }
+        )
+    return items
 
 
 def region_payload(row: Region) -> dict:
@@ -141,8 +186,15 @@ def region_payload(row: Region) -> dict:
     }
 
 
-def list_regions(db: Session) -> list[dict]:
-    return [region_payload(row) for row in db.scalars(select(Region)).all()]
+def list_regions(db: Session, disease_id: str | None = None) -> list[dict]:
+    rows = [region_payload(row) for row in db.scalars(select(Region)).all()]
+    if not disease_id:
+        return rows
+    frame = observations_frame(db, disease_id=disease_id)
+    if frame.empty:
+        return []
+    allowed = set(frame["region_id"].astype(str))
+    return [row for row in rows if row["id"] in allowed]
 
 
 def region_context_map(db: Session) -> dict[str, dict]:
@@ -212,14 +264,25 @@ def completeness(db: Session, disease_id: str, region_id: str) -> dict:
     }
 
 
-def overview(db: Session, disease_id: str, region_id: str, cutoff: datetime | str | None = None) -> dict:
-    frame = observations_frame(db, disease_id=disease_id, region_id=region_id)
+def overview(db: Session, disease_id: str, region_id: str, cutoff: datetime | str | None = None, metric: str | None = None) -> dict:
+    spec = get_disease(disease_id)
+    metric = metric or (spec.default_target if spec else "hospital_admissions")
+    frame = observations_frame(db, disease_id=disease_id, region_id=region_id, metric=metric)
     banner = data_mode_banner(db)
+    disease_payload = next((item for item in list_diseases(db) if item["id"] == disease_id), None)
     if frame.empty:
-        return {"banner": banner, "series": [], "revision": {"estimable": False, "message": "无法估计修订过程"}, "quality": {}}
+        return {
+            "banner": banner,
+            "series": [],
+            "revision": {"estimable": False, "message": "无法估计修订过程"},
+            "quality": {},
+            "disease": disease_payload,
+            "metric": metric,
+            "status_label": None if spec is None else spec.status_label,
+        }
     if cutoff is None:
         cutoff = frame["issued_at"].max()
-    admissions = select_snapshot(frame[frame["metric"] == "hospital_admissions"], cutoff, "vintage")
+    admissions = select_snapshot(frame[frame["metric"] == metric], cutoff, "vintage")
     index, values = prepare_weekly(admissions)
     series = []
     for stamp, value in zip(index, values):
@@ -229,7 +292,7 @@ def overview(db: Session, disease_id: str, region_id: str, cutoff: datetime | st
                 "value": None if value != value else float(value),
             }
         )
-    revision = estimate_revision(frame[frame["metric"] == "hospital_admissions"], cutoff)
+    revision = estimate_revision(frame[frame["metric"] == metric], cutoff)
     last_value = None
     for item in reversed(series):
         if item["value"] is not None:
@@ -255,6 +318,8 @@ def overview(db: Session, disease_id: str, region_id: str, cutoff: datetime | st
         "nowcast": nowcast,
         "quality": quality,
         "region": region,
-        "disease": next((item for item in list_diseases(db) if item["id"] == disease_id), None),
+        "disease": disease_payload,
+        "metric": metric,
+        "status_label": None if spec is None else spec.status_label,
         "analog": analog,
     }

@@ -1,0 +1,20 @@
+{
+  "result": 1,
+  "message": ["success"],
+  "epidata": [
+    {
+      "geo_value": "pa",
+      "signal": "confirmed_admissions_rsv_ew",
+      "time_value": 202440,
+      "issue": 202441,
+      "value": 18.0
+    },
+    {
+      "geo_value": "pa",
+      "signal": "confirmed_admissions_rsv_ew",
+      "time_value": 202441,
+      "issue": 202442,
+      "value": 22.0
+    }
+  ]
+}

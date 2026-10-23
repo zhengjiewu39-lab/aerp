@@ -60,6 +60,7 @@ def overview_view(
     disease_id: str,
     region_id: str,
     cutoff: str | None = Query(default=None),
+    metric: str | None = Query(default=None),
     db: Session = Depends(get_db),
 ):
-    return overview(db, disease_id, region_id, cutoff)
+    return overview(db, disease_id, region_id, cutoff, metric=metric)

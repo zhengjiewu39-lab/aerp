@@ -145,6 +145,8 @@ def evaluations(experiment_id: str, db: Session = Depends(get_db)):
             "width_80": row.width_80,
             "width_95": row.width_95,
             "phase": row.phase,
+            "purpose": getattr(row, "purpose", "final"),
+            "split_set": getattr(row, "split_set", "unspecified"),
             "notes": row.notes,
         }
         for row in rows

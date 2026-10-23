@@ -38,18 +38,44 @@ def _poisson_ppf(level: float, mu: float) -> float:
 
 
 def _nbinom_ppf(level: float, mean: float, alpha: float) -> float:
-    """负二项（均值-离散参数化）分位数。"""
+    """负二项（均值-离散参数化）分位数。优先精确 PMF；大均值才用正态近似。"""
     mean = float(np.clip(mean, 1e-9, 1e6))
     alpha = float(max(alpha, 1e-9))
     n = 1.0 / alpha
     p = n / (n + mean)
-    # 用 Gamma-Poisson 混合的正态近似，失败时退回泊松
-    variance = mean + alpha * mean * mean
-    if variance <= 0:
-        return _poisson_ppf(level, mean)
-    z = _normsinv(level)
-    approx = mean + z * math.sqrt(variance)
-    return max(0.0, approx)
+    try:
+        from scipy.stats import nbinom
+
+        value = float(nbinom.ppf(level, n, p))
+        if np.isfinite(value):
+            return max(0.0, value)
+    except Exception:
+        pass
+    if mean > 80:
+        variance = mean + alpha * mean * mean
+        z = _normsinv(level)
+        return max(0.0, mean + z * math.sqrt(max(variance, 1e-9)) - 0.5)
+    target = float(np.clip(level, 1e-9, 1 - 1e-9))
+    # Gamma-Poisson：P(K=k) 递推
+    r = n
+    cdf = 0.0
+    term = (p ** r)
+    if not np.isfinite(term) or term <= 0:
+        variance = mean + alpha * mean * mean
+        return max(0.0, mean + _normsinv(level) * math.sqrt(max(variance, 1e-9)))
+    k = 0
+    cdf += term
+    if cdf >= target:
+        return 0.0
+    q = 1.0 - p
+    limit = int(mean + 40 * math.sqrt(mean + alpha * mean * mean) + 40)
+    while k < limit:
+        k += 1
+        term *= (k + r - 1) / k * q
+        cdf += term
+        if cdf >= target:
+            return float(k)
+    return float(k)
 
 
 def _normsinv(p: float) -> float:
@@ -114,7 +140,8 @@ def _fit_poisson_irls(
         z = eta + (y - mu) / np.maximum(mu, 1e-6)
         sw = np.sqrt(np.maximum(mu, 1e-8))
         xw = design * sw[:, None]
-        yw = z * sw
+        # 工作响应 z 对应线性预测 eta=Xβ+offset，WLS 必须拟合 z-offset，不能把 offset 再吸进截距。
+        yw = (z - off) * sw
         try:
             coef_new, *_ = np.linalg.lstsq(xw, yw, rcond=None)
         except np.linalg.LinAlgError as exc:

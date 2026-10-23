@@ -15,9 +15,30 @@ from aerp.core.timeutil import utcnow
 EPIDATA_BASE = "https://api.delphi.cmu.edu/epidata"
 NHSN_DOCS = "https://cmu-delphi.github.io/delphi-epidata/api/v5-signals/nhsn.html"
 LICENSE_NOTE = (
-    "Delphi Epidata 的 NHSN 流感住院信号来自 CDC NHSN，许可按 Delphi 与上游数据源条款。"
+    "Delphi Epidata 的 NHSN 住院信号来自 CDC NHSN，许可按 Delphi 与上游数据源条款。"
+    "流感、COVID-19、RSV 使用各自独立信号，不能把某一病种连接器改名后宣称支持另一病种。"
     "本项目不改变第三方许可证。"
 )
+SIGNAL_BY_DISEASE = {
+    "influenza": {
+        "data_source": "nhsn",
+        "signal": "confirmed_admissions_flu_ew",
+        "metric": "hospital_admissions",
+        "label": "周确诊流感住院",
+    },
+    "covid19": {
+        "data_source": "nhsn",
+        "signal": "confirmed_admissions_covid_ew",
+        "metric": "hospital_admissions",
+        "label": "周确诊 COVID-19 住院",
+    },
+    "rsv": {
+        "data_source": "nhsn",
+        "signal": "confirmed_admissions_rsv_ew",
+        "metric": "hospital_admissions",
+        "label": "周确诊 RSV 住院",
+    },
+}
 RAW_DIR = ROOT / "data" / "raw" / "delphi"
 VERIFICATION_PATH = RAW_DIR / "verification.json"
 
@@ -61,6 +82,35 @@ PROBE_SPECS = (
             "time_values": "20240106",
         },
         "note": "V5 covidcast：nhsn/confirmed_admissions_flu_ew",
+        "disease_id": "influenza",
+    },
+    {
+        "id": "covidcast_nhsn_covid_week",
+        "path": "/covidcast",
+        "params": {
+            "data_source": "nhsn",
+            "signal": "confirmed_admissions_covid_ew",
+            "time_type": "week",
+            "geo_type": "state",
+            "geo_value": "pa",
+            "time_values": "202440",
+        },
+        "note": "covidcast：nhsn/confirmed_admissions_covid_ew（独立 COVID 信号）",
+        "disease_id": "covid19",
+    },
+    {
+        "id": "covidcast_nhsn_rsv_week",
+        "path": "/covidcast",
+        "params": {
+            "data_source": "nhsn",
+            "signal": "confirmed_admissions_rsv_ew",
+            "time_type": "week",
+            "geo_type": "state",
+            "geo_value": "pa",
+            "time_values": "202440",
+        },
+        "note": "covidcast：nhsn/confirmed_admissions_rsv_ew（独立 RSV 信号）",
+        "disease_id": "rsv",
     },
 )
 
@@ -73,6 +123,8 @@ def _get(url: str, timeout: int = 45) -> tuple[int, bytes]:
     except HTTPError as exc:
         body = exc.read() if exc.fp else b""
         return int(exc.code), body
+    except (URLError, TimeoutError, OSError) as exc:
+        raise URLError(str(exc)) from exc
 
 
 def _epidata_rows(payload: dict) -> list:
@@ -111,7 +163,7 @@ def _parse_delphi_time(series: pd.Series) -> pd.Series:
     return out
 
 
-def parse_epidata_json(payload: bytes | dict, *, source_id: str) -> dict:
+def parse_epidata_json(payload: bytes | dict, *, source_id: str, disease_id: str | None = None) -> dict:
     data = json.loads(payload) if isinstance(payload, (bytes, bytearray)) else payload
     rows = _epidata_rows(data)
     if not rows:
@@ -138,13 +190,23 @@ def parse_epidata_json(payload: bytes | dict, *, source_id: str) -> dict:
         issued = _parse_delphi_time(frame[issue_col]).fillna(period_end)
     geo_value = frame[geo].astype(str)
     region_id = geo_value.where(~geo_value.str.fullmatch(r"\d+"), geo_value.str.zfill(2))
+    inferred = disease_id
+    if inferred is None:
+        signal_name = str(frame[columns["signal"]].iloc[0]) if "signal" in columns else source_id
+        if "covid" in str(signal_name).lower():
+            inferred = "covid19"
+        elif "rsv" in str(signal_name).lower():
+            inferred = "rsv"
+        else:
+            inferred = "influenza"
+    spec = SIGNAL_BY_DISEASE.get(inferred, SIGNAL_BY_DISEASE["influenza"])
     work = pd.DataFrame(
         {
-            "disease_id": "influenza",
+            "disease_id": inferred,
             "region_id": region_id,
             "period_end": period_end,
             "issued_at": issued,
-            "metric": "hospital_admissions",
+            "metric": spec["metric"],
             "value": pd.to_numeric(frame[value_col], errors="coerce"),
             "unit": "count",
             "source_id": source_id,
@@ -153,14 +215,22 @@ def parse_epidata_json(payload: bytes | dict, *, source_id: str) -> dict:
     )
     work["period_start"] = work["period_end"] - pd.Timedelta(days=6)
     work = work.dropna(subset=["period_end", "issued_at"])
+    n_issues = int(work["issued_at"].nunique()) if not work.empty else 0
+    if issue_col and n_issues > 1:
+        replay_mode = "vintage"
+        note = "同一周期有多个 issue 时，才按真实 vintage 回放。"
+    else:
+        replay_mode = "final_time_split"
+        note = "当前 Delphi 响应只有单一 issue（常见为最新快照）。只能做最终数据时间切分，不能称为真实实时回测。"
     return {
         "status": "success",
         "message": f"已解析 Delphi {source_id}。",
         "rows": work,
         "n_rows": int(len(work)),
         "n_regions": int(work["region_id"].nunique()) if not work.empty else 0,
-        "replay_mode": "vintage" if issue_col else "issue_unknown",
-        "note": "无 issue/as_of 时不能称为真实 vintage。",
+        "replay_mode": replay_mode,
+        "n_distinct_issues": n_issues,
+        "note": note,
     }
 
 
@@ -192,7 +262,7 @@ def verify_delphi(*, cache_dir: Path | None = None, payload_by_id: dict[str, byt
             record["bytes"] = len(body)
             record["sha256"] = sha256_bytes(body)
             parsed_json = json.loads(body.decode("utf-8", errors="replace"))
-            parsed = parse_epidata_json(parsed_json, source_id=spec["id"])
+            parsed = parse_epidata_json(parsed_json, source_id=spec["id"], disease_id=spec.get("disease_id"))
             record["parse_status"] = parsed.get("status")
             record["n_rows"] = parsed.get("n_rows", 0)
             record["message"] = parsed.get("message")
@@ -261,3 +331,80 @@ def observations_from_delphi(parsed: dict) -> pd.DataFrame:
     if parsed.get("status") != "success":
         return pd.DataFrame()
     return parsed["rows"].copy()
+
+
+def fetch_nhsn_weekly(
+    disease_id: str,
+    *,
+    geo_value: str = "pa",
+    time_values: str = "202240-202520",
+    cache_dir: Path | None = None,
+    payload: bytes | None = None,
+) -> dict:
+    """按病种拉取 NHSN 周住院。COVID/RSV 使用独立信号，不是流感连接器改名。"""
+    spec = SIGNAL_BY_DISEASE.get(disease_id)
+    if spec is None:
+        return {"status": "error", "message": f"没有 {disease_id} 的 NHSN 周住院信号配置。", "rows": pd.DataFrame()}
+    cache_dir = cache_dir or RAW_DIR
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    params = {
+        "data_source": spec["data_source"],
+        "signal": spec["signal"],
+        "time_type": "week",
+        "geo_type": "state",
+        "geo_value": geo_value,
+        "time_values": time_values,
+    }
+    url = EPIDATA_BASE + "/covidcast?" + urlencode(params)
+    errors = []
+    if payload is None:
+        try:
+            status_code, body = _get(url)
+        except (URLError, TimeoutError, OSError) as exc:
+            return {
+                "status": "error",
+                "message": f"Delphi {disease_id}/{spec['signal']} 请求失败：{exc}",
+                "source_url": url,
+                "rows": pd.DataFrame(),
+            }
+        if status_code >= 400:
+            return {
+                "status": "error",
+                "message": f"Delphi {disease_id}/{spec['signal']} HTTP {status_code}：{body[:240]!r}",
+                "source_url": url,
+                "rows": pd.DataFrame(),
+            }
+        payload = body
+    checksum = sha256_bytes(payload)
+    raw_path = cache_dir / f"nhsn-{disease_id}-{checksum[:12]}.json"
+    if not raw_path.exists():
+        raw_path.write_bytes(payload)
+    parsed = parse_epidata_json(payload, source_id=f"nhsn_{disease_id}", disease_id=disease_id)
+    parsed["provenance"] = {
+        "source_url": url,
+        "downloaded_at": utcnow().isoformat(sep=" ", timespec="seconds"),
+        "sha256": checksum,
+        "raw_path": str(raw_path),
+        "signal": spec["signal"],
+        "disease_id": disease_id,
+        "license_note": LICENSE_NOTE,
+        "note": "downloaded_at 不是历史发布时间。无 issue 时不能称为真实 vintage。",
+        "fetch_notes": errors,
+    }
+    return parsed
+
+
+def verified_diseases(last: dict | None = None) -> list[str]:
+    last = last if last is not None else last_verification()
+    if not last:
+        return []
+    found = []
+    for probe in last.get("probes") or []:
+        if probe.get("verified") and probe.get("id"):
+            if "covid" in probe["id"] and "covid19" not in found:
+                found.append("covid19")
+            elif "rsv" in probe["id"] and "rsv" not in found:
+                found.append("rsv")
+            elif "flu" in probe["id"] and "influenza" not in found:
+                found.append("influenza")
+    return found

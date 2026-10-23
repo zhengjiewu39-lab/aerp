@@ -55,3 +55,19 @@ def infer_splits(frame: pd.DataFrame, *, metric: str = "hospital_admissions") ->
         "data_start": as_timestamp(start).date().isoformat(),
         "data_end": as_timestamp(end).date().isoformat(),
     }
+
+
+def assign_split_set(period_end, splits: dict | None) -> str:
+    """把目标周落到开发/验证/锁定测试。没有划分时记 unspecified，不假装已经锁定。"""
+    if not splits:
+        return "unspecified"
+    stamp = as_timestamp(period_end).normalize()
+    for name in ("locked_test", "validation", "development"):
+        window = splits.get(name)
+        if not window:
+            continue
+        start = as_timestamp(window["start"]).normalize()
+        end = as_timestamp(window["end"]).normalize()
+        if start <= stamp <= end:
+            return name
+    return "unspecified"

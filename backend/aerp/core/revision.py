@@ -214,10 +214,14 @@ def sample_revised_frames(
 
 
 def mix_quantile_dicts(items: list[dict[float, float]]) -> dict[float, float]:
-    if not items:
-        return {}
-    levels = sorted(items[0])
-    mixed = {level: float(np.mean([item[level] for item in items])) for level in levels}
-    from aerp.core.quantiles import ordered_nonnegative
+    """保留的分位数平均组合。调用方必须标明不是完整概率混合。"""
+    from aerp.core.quantiles import mix_quantile_average
 
-    return ordered_nonnegative(mixed)
+    return mix_quantile_average(items)
+
+
+def mix_forecast_distributions(items: list[dict[float, float]]) -> dict[float, float]:
+    """等权混合预测 CDF。用于修订抽样后的条件预测合并。"""
+    from aerp.core.quantiles import mix_predictive_cdfs
+
+    return mix_predictive_cdfs(items)

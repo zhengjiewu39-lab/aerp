@@ -91,6 +91,20 @@ export function DataManage() {
           >
             重新生成合成演示数据
           </button>
+          <button
+            className="btn"
+            onClick={() =>
+              api
+                .seedMeasles()
+                .then((result) => {
+                  setMessage(result.message || "已写入麻疹合成示例。");
+                  return reload();
+                })
+                .catch((err) => setError(String(err.message || err)))
+            }
+          >
+            生成麻疹合成示例
+          </button>
         </div>
         <div className="mt-4 grid gap-3 md:grid-cols-[1fr_auto_auto]">
           <input type="file" accept=".csv,text/csv" onChange={(e) => setFile(e.target.files?.[0] || null)} />

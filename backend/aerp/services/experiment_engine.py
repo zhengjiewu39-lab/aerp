@@ -27,7 +27,10 @@ from aerp.core.models.persistence import PersistenceModel
 from aerp.core.research_mode import RESEARCH_QUESTION, analog_allowed_in_forecasts, public_mode_payload, resolve_mode, research_notes
 from aerp.core.phases import classify_phase
 from aerp.core.quantiles import scale_around_median
-from aerp.core.revision import apply_nowcast, estimate_revision, mix_quantile_dicts, sample_revised_frames
+from aerp.core.reliability import reliability_evidence
+from aerp.core.block_resample import paired_block_intervals
+from aerp.core.revision import apply_nowcast, estimate_revision, mix_forecast_distributions, sample_revised_frames
+from aerp.research.splits import assign_split_set, infer_splits
 from aerp.core.scoring import score_forecast
 from aerp.core.series import frame_from_grid, prepare_weekly, tail_weeks
 from aerp.core.change_labels import diagnosis_report, infer_label_source
@@ -100,6 +103,11 @@ def create_experiment(db: Session, payload: dict) -> Experiment:
     cutoff = as_timestamp(payload["cutoff_time"]).to_pydatetime()
     frame = observations_frame(db, disease_id=payload["disease_id"])
     visible = select_snapshot(frame, cutoff, payload.get("replay_mode", "vintage"))
+    if not config.get("splits"):
+        split_info = infer_splits(frame, metric=payload.get("target_metric", "hospital_admissions"))
+        config["splits"] = split_info.get("splits") or {}
+        config["split_status"] = split_info.get("status")
+        config["split_message"] = split_info.get("message")
     experiment = Experiment(
         id=experiment_id,
         name=payload.get("name") or f"回放 {experiment_id}",
@@ -209,6 +217,8 @@ def _fit_panel_models(
     pack: dict = {arm: {} for arm in PANEL_ARMS}
     events = []
     requested = [arm for arm in PANEL_ARMS if arm in (experiment.models or [])]
+    if "adaptive" in (experiment.models or []) and "hierarchical" not in requested and not ablations.get("no_hierarchy"):
+        requested.append("hierarchical")
     if not requested:
         pack["_events"] = events
         return pack
@@ -312,15 +322,15 @@ def _mix_revision_samples(adaptive_pred, sampled: dict, horizons: list[int], tar
         for horizon, item in pred.horizons.items():
             bags[int(horizon)].append(item.quantiles)
     for horizon, item in adaptive_pred.horizons.items():
-        mixed = mix_quantile_dicts(bags.get(int(horizon)) or [])
+        mixed = mix_forecast_distributions(bags.get(int(horizon)) or [])
         if not mixed:
             continue
-        blended = mix_quantile_dicts([item.quantiles, mixed])
+        blended = mix_forecast_distributions([item.quantiles, mixed])
         adaptive_pred.horizons[horizon] = HorizonForecast(
             int(horizon),
             blended,
-            item.method + "|revision_sample_mix",
-            item.quality_note + " 修订抽样与点预测分位数等权混合；不声称覆盖全部不确定性。",
+            item.method + "|revision_cdf_mix",
+            item.quality_note + " 修订抽样后混合预测 CDF，再取分位数。对应分位数平均另作独立组合方法。",
         )
     adaptive_pred.metadata = dict(adaptive_pred.metadata or {})
     adaptive_pred.metadata["revision_sampling"] = {
@@ -342,6 +352,7 @@ def _predict_arms(
     config: dict,
     ablations: dict,
     analog_pred=None,
+    hierarchical_pred=None,
     target_week_ends: dict[int, pd.Timestamp] | None = None,
 ) -> dict:
     """对照臂使用未修改的组件预测；短窗口、修订、形态和区间倍率只作用于 adaptive。"""
@@ -421,6 +432,16 @@ def _predict_arms(
                 analog_note = "历史形态相似度不足，类比未进入适应组合。"
         elif not use_analog:
             analog_note = "研究模式：教学形态库未进入正式适应组合。"
+        hierarchy_note = "未并入地区部分共享。"
+        if hierarchical_pred is not None and getattr(hierarchical_pred, "status", None) == "success" and not ablations.get("no_hierarchy"):
+            share = 0.25
+            remaining = 1.0 - share
+            adaptive_weights = {key: value * remaining for key, value in adaptive_weights.items()}
+            adaptive_weights["hierarchical"] = share
+            adaptive_preds = list(adaptive_preds) + [hierarchical_pred]
+            hierarchy_note = "适应臂并入分层部分共享，权重 0.25。no_hierarchy 会去掉这一项。"
+        elif ablations.get("no_hierarchy"):
+            hierarchy_note = "消融：适应臂不使用地区部分共享。"
         if decision.use_revision_adjustment and not ablations.get("no_revision"):
             if ablations.get("no_uncertainty_propagation"):
                 note_extra = "已启用修订点调整；消融关闭了修订抽样不确定性传播。"
@@ -432,7 +453,16 @@ def _predict_arms(
             adaptive_preds,
             adaptive_weights,
             model_id="adaptive",
-            note="异常识别与适应规则。" + " ".join(decision.notes) + " " + window_note + " " + note_extra + " " + analog_note,
+            note="异常识别与适应规则。"
+            + " ".join(decision.notes)
+            + " "
+            + window_note
+            + " "
+            + note_extra
+            + " "
+            + analog_note
+            + " "
+            + hierarchy_note,
         )
         if adaptive.status == "success" and decision.interval_scale != 1.0 and not ablations.get("no_anomaly"):
             for _horizon, item in adaptive.horizons.items():
@@ -440,6 +470,14 @@ def _predict_arms(
                 item.method = item.method + f"|interval_scale={decision.interval_scale}"
                 item.quality_note += " 区间扩大倍率需由回放覆盖率检验，不保证名义覆盖。"
         outputs["adaptive"] = adaptive
+        if adaptive.status == "success":
+            adaptive.metadata["reliability"] = reliability_evidence(
+                train_frame=train_frame,
+                recent_scores=history_scores,
+                predictions=[{"quantiles": item.quantiles} for item in adaptive.horizons.values()],
+                used_future_covariates=False,
+                degraded=False,
+            )
         outputs["_adaptive_meta"] = {
             "decision": decision.__dict__,
             "window_choice": window_choice,
@@ -530,6 +568,7 @@ def _store_forecasts(
                     else as_timestamp(last_visible).date().isoformat(),
                     "trajectory_method": "gaussian_copula_ar1",
                     "trajectory_note": "联合预警概率在评价时由分位数生成 copula 轨迹；无轨迹才退回独立边际。",
+                    "reliability": result.metadata.get("reliability"),
                 },
             )
             db.add(row)
@@ -589,6 +628,7 @@ def _evaluate_forecasts(
                     phase=classify_phase(phase_series_cache[key], forecast.target_period_end),
                     arm=forecast.arm,
                     purpose=purpose,
+                    split_set=assign_split_set(forecast.target_period_end, (experiment.config or {}).get("splits")),
                     notes="待评价：固定成熟滞后版本在评价时点尚不可见。",
                 )
                 db.add(evaluation)
@@ -626,6 +666,7 @@ def _evaluate_forecasts(
             phase=classify_phase(phase_series_cache[key], forecast.target_period_end),
             arm=forecast.arm,
             purpose=purpose,
+            split_set=assign_split_set(forecast.target_period_end, (experiment.config or {}).get("splits")),
             notes="目标版本=固定成熟滞后可见值，不等于最终真实值。在线评分不用于最终论文补评反向改权重。",
         )
         db.add(evaluation)
@@ -733,8 +774,34 @@ def _summarize(db: Session, experiment: Experiment, labels: pd.DataFrame) -> dic
         model_id="adaptive",
     )
     pending = sum(1 for row in evaluations if row.status == "pending")
+    locked_rows = [row for row in evaluations if row.status == "scored" and getattr(row, "split_set", "") == "locked_test"]
+    locked_summary = {}
+    locked_by_model: dict[str, list] = defaultdict(list)
+    for row in locked_rows:
+        locked_by_model[row.model_id].append(row)
+    for model_id, rows in locked_by_model.items():
+        locked_summary[model_id] = {
+            "n": len(rows),
+            "mae": float(np.mean([row.abs_error for row in rows])),
+            "wis": float(np.mean([row.wis for row in rows])),
+            "coverage_80": float(np.mean([row.covered_80 for row in rows])),
+        }
+    pairwise = {}
+    if "adaptive" in by_model and "equal_weight" in by_model:
+        left_map = {(row.region_id, row.horizon, str(row.target_period_end)): row.wis for row in by_model["adaptive"]}
+        right_map = {(row.region_id, row.horizon, str(row.target_period_end)): row.wis for row in by_model["equal_weight"]}
+        keys = sorted(set(left_map) & set(right_map))
+        if keys:
+            left = np.array([left_map[key] for key in keys], dtype=float)
+            right = np.array([right_map[key] for key in keys], dtype=float)
+            blocks = np.array([f"{key[0]}|{str(key[2])[:10]}" for key in keys])
+            pairwise["adaptive_minus_equal_wis"] = paired_block_intervals(left, right, block_ids=blocks, seed=int(experiment.random_seed or 42))
+            pairwise["block_design"] = "同一地区、同一目标周的多时长预测同块抽取；正值表示 adaptive 的 WIS 更高（更差）。"
     return {
         "models": model_summary,
+        "primary_split": "locked_test" if locked_summary else "all_scored_no_locked_split",
+        "models_locked_test": locked_summary,
+        "pairwise_block_resample": pairwise,
         "pending_evaluations": pending,
         "alert_skill": skill_for_research,
         "change_diagnosis": change,
@@ -815,6 +882,8 @@ def run_experiment(db: Session, experiment_id: str) -> Experiment:
                 experiment.horizons,
                 rule=reference_rule,
                 week_grid=week_grid,
+                disease_id=experiment.disease_id,
+                target=experiment.target_metric,
             )
             previous = [
                 row
@@ -974,6 +1043,7 @@ def run_experiment(db: Session, experiment_id: str) -> Experiment:
                         revised_train, experiment.horizons, None, task.target_week_ends()
                     )
 
+                hier_pred = None if ablations.get("no_hierarchy") else (panel_pack.get("hierarchical") or {}).get(region_id)
                 predictions = _predict_arms(
                     components,
                     arm_ids=experiment.models,
@@ -984,6 +1054,7 @@ def run_experiment(db: Session, experiment_id: str) -> Experiment:
                     config=local_config,
                     ablations=ablations,
                     analog_pred=analog_pred,
+                    hierarchical_pred=hier_pred,
                     target_week_ends=task.target_week_ends(),
                 )
                 if "adaptive" in experiment.models and adaptive_components is not components:
@@ -997,6 +1068,7 @@ def run_experiment(db: Session, experiment_id: str) -> Experiment:
                         config=local_config,
                         ablations=ablations,
                         analog_pred=analog_pred,
+                        hierarchical_pred=hier_pred,
                         target_week_ends=task.target_week_ends(),
                     )
                     predictions["adaptive"] = adaptive_only["adaptive"]
@@ -1162,6 +1234,7 @@ def export_experiment(db: Session, experiment_id: str) -> dict:
                 "covered_95": row.covered_95,
                 "phase": row.phase,
                 "purpose": getattr(row, "purpose", "final"),
+                "split_set": getattr(row, "split_set", "unspecified"),
                 "notes": row.notes,
             }
             for row in evaluations
