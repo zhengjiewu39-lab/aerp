@@ -18,6 +18,14 @@ class Settings(BaseSettings):
     aerp_port: int = 8000
     aerp_cors_origins: str = "http://127.0.0.1:5173,http://localhost:5173"
     aerp_sync_tasks: bool = False
+    aerp_operator_name: str = "local-researcher"
+    aerp_ai_provider: str = ""
+    aerp_ai_base_url: str = "https://api.openai.com/v1"
+    aerp_ai_api_key: str = ""
+    aerp_ai_model: str = ""
+    aerp_ai_timeout_seconds: int = 60
+    aerp_ai_max_retries: int = 2
+    aerp_ai_allow_mock: bool = False
 
     @property
     def cors_origins(self) -> list[str]:

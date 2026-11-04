@@ -97,4 +97,39 @@ export const api = {
     return request<any>("/api/data/import", { method: "POST", body: form });
   },
   seedDemo: () => request<any>("/api/demo/seed?force=true&replace=true", { method: "POST" }),
+  geoUnits: (params?: Record<string, string>, init?: RequestInit) => {
+    const q = new URLSearchParams(params);
+    return request<any>(`/api/geo/units?${q}`, init);
+  },
+  geoBoundaries: (params?: Record<string, string>, init?: RequestInit) => {
+    const q = new URLSearchParams(params);
+    return request<any>(`/api/geo/boundaries?${q}`, init);
+  },
+  mapObservations: (params: Record<string, string>, init?: RequestInit) => {
+    const q = new URLSearchParams(params);
+    return request<any>(`/api/map/observations?${q}`, init);
+  },
+  mapCoverage: (params: Record<string, string>, init?: RequestInit) => {
+    const q = new URLSearchParams(params);
+    return request<any>(`/api/map/coverage?${q}`, init);
+  },
+  mapRegion: (geoId: string, params: Record<string, string>, init?: RequestInit) => {
+    const q = new URLSearchParams(params);
+    return request<any>(`/api/map/regions/${encodeURIComponent(geoId)}?${q}`, init);
+  },
+  regionAnalyses: (geoId: string, params: Record<string, string>) => {
+    const q = new URLSearchParams(params);
+    return request<any>(`/api/map/regions/${encodeURIComponent(geoId)}/analyses?${q}`);
+  },
+  importWhoCovid: (live = false) => request<any>(`/api/map/who-covid/import?live=${live ? "true" : "false"}`, { method: "POST" }),
+  aiStatus: () => request<any>("/api/ai/status"),
+  createAiAnalysis: (body: Record<string, unknown>) =>
+    request<any>("/api/analyses/ai", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }),
+  createManualAnalysis: (body: Record<string, unknown>) =>
+    request<any>("/api/analyses/manual", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }),
+  getAnalysis: (id: string) => request<any>(`/api/analyses/${id}`),
+  reviewAnalysis: (id: string, body: Record<string, unknown>) =>
+    request<any>(`/api/analyses/${id}/review`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }),
+  analysisRevisions: (id: string) => request<any>(`/api/analyses/${id}/revisions`),
+  analysisExport: (id: string) => request<any>(`/api/analyses/${id}/export`),
 };

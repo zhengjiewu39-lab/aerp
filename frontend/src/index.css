@@ -41,3 +41,8 @@ body {
 .table-wrap {
   @apply overflow-x-auto rounded-lg border border-slate-200;
 }
+
+.maplibregl-popup-content {
+  font-size: 12px;
+  color: #0f2740;
+}

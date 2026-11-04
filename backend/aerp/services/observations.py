@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 
 import pandas as pd
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from aerp.core.analogs import match_values
@@ -24,48 +24,42 @@ def observations_frame(
     region_id: str | None = None,
     metric: str | None = None,
 ) -> pd.DataFrame:
-    stmt = select(ObservationVintage)
+    stmt = select(
+        ObservationVintage.disease_id,
+        ObservationVintage.region_id,
+        ObservationVintage.period_start,
+        ObservationVintage.period_end,
+        ObservationVintage.issued_at,
+        ObservationVintage.metric,
+        ObservationVintage.value,
+        ObservationVintage.unit,
+        ObservationVintage.source_id,
+        ObservationVintage.quality_flag,
+        ObservationVintage.import_batch_id,
+    )
     if disease_id:
         stmt = stmt.where(ObservationVintage.disease_id == disease_id)
     if region_id:
         stmt = stmt.where(ObservationVintage.region_id == region_id)
     if metric:
         stmt = stmt.where(ObservationVintage.metric == metric)
-    rows = db.scalars(stmt).all()
+    rows = db.execute(stmt).all()
+    columns = [
+        "disease_id",
+        "region_id",
+        "period_start",
+        "period_end",
+        "issued_at",
+        "metric",
+        "value",
+        "unit",
+        "source_id",
+        "quality_flag",
+        "import_batch_id",
+    ]
     if not rows:
-        return pd.DataFrame(
-            columns=[
-                "disease_id",
-                "region_id",
-                "period_start",
-                "period_end",
-                "issued_at",
-                "metric",
-                "value",
-                "unit",
-                "source_id",
-                "quality_flag",
-                "import_batch_id",
-            ]
-        )
-    return pd.DataFrame(
-        [
-            {
-                "disease_id": row.disease_id,
-                "region_id": row.region_id,
-                "period_start": row.period_start,
-                "period_end": row.period_end,
-                "issued_at": row.issued_at,
-                "metric": row.metric,
-                "value": row.value,
-                "unit": row.unit,
-                "source_id": row.source_id,
-                "quality_flag": row.quality_flag,
-                "import_batch_id": row.import_batch_id,
-            }
-            for row in rows
-        ]
-    )
+        return pd.DataFrame(columns=columns)
+    return pd.DataFrame(rows, columns=columns)
 
 
 def labels_frame(db: Session) -> pd.DataFrame:
@@ -119,20 +113,41 @@ def data_mode_banner(db: Session) -> dict:
     return {"mode": "imported", "banner": IMPORTED_BANNER, "is_synthetic": False}
 
 
+def _coverage_by_disease(db: Session) -> dict[str, dict]:
+    """SQL aggregates only. Do not load every vintage into pandas."""
+    coverage: dict[str, dict] = {}
+    agg = db.execute(
+        select(
+            ObservationVintage.disease_id,
+            func.count().label("n_rows"),
+            func.count(func.distinct(ObservationVintage.region_id)).label("n_regions"),
+            func.min(ObservationVintage.period_end).label("start"),
+            func.max(ObservationVintage.period_end).label("end"),
+            func.max(ObservationVintage.issued_at).label("updated_at"),
+        ).group_by(ObservationVintage.disease_id)
+    ).all()
+    metrics = db.execute(select(ObservationVintage.disease_id, ObservationVintage.metric).distinct()).all()
+    metrics_map: dict[str, set[str]] = {}
+    for disease_id, metric in metrics:
+        metrics_map.setdefault(str(disease_id), set()).add(str(metric))
+    for row in agg:
+        disease_id = str(row.disease_id)
+        start = pd.Timestamp(row.start).date().isoformat() if row.start is not None else None
+        end = pd.Timestamp(row.end).date().isoformat() if row.end is not None else None
+        updated = pd.Timestamp(row.updated_at).isoformat(sep=" ", timespec="seconds") if row.updated_at is not None else None
+        coverage[disease_id] = {
+            "n_rows": int(row.n_rows),
+            "n_regions": int(row.n_regions),
+            "metrics": sorted(metrics_map.get(disease_id, set())),
+            "start": start,
+            "end": end,
+            "updated_at": updated,
+        }
+    return coverage
+
+
 def list_diseases(db: Session) -> list[dict]:
-    coverage = {}
-    frame = observations_frame(db)
-    if not frame.empty:
-        grouped = frame.groupby("disease_id")
-        for disease_id, group in grouped:
-            coverage[str(disease_id)] = {
-                "n_rows": int(len(group)),
-                "n_regions": int(group["region_id"].nunique()),
-                "metrics": sorted({str(item) for item in group["metric"].dropna().unique()}),
-                "start": pd.to_datetime(group["period_end"]).min().date().isoformat(),
-                "end": pd.to_datetime(group["period_end"]).max().date().isoformat(),
-                "updated_at": pd.to_datetime(group["issued_at"]).max().isoformat(sep=" ", timespec="seconds"),
-            }
+    coverage = _coverage_by_disease(db)
     items = []
     seen = set()
     for spec in DISEASE_SPECS.values():

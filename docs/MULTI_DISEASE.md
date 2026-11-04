@@ -7,7 +7,7 @@
 | 疾病 | 状态 | 含义 | 默认目标 |
 | --- | --- | --- | --- |
 | 流感 | 真实接入，已有回放验证 | FluSight/NHSN 周确诊流感住院流程已存在 | 周住院 |
-| COVID-19 | 真实数据可预测 | Delphi NHSN `confirmed_admissions_covid_ew` 已拉取宾州周住院。默认 covidcast 响应常为单一 issue，只能做最终数据时间切分，不能称为真实实时回测 | 周住院 |
+| COVID-19 | 真实数据可预测 | 国家层：WHO 周报告病例（拉取后）。州级住院：Delphi NHSN `confirmed_admissions_covid_ew`。两类指标不得混用。默认 covidcast 常为单一 issue，只能做最终数据时间切分 | 周病例 |
 | RSV | 真实数据可预测 | 独立信号 `confirmed_admissions_rsv_ew` 已验证可解析。同样需核查是否有多版本 | 周住院 |
 | 登革热 | 待接入 | 适配接口与来源核查已写；无可靠可再分发周病例修订版本 | 周病例 |
 | 麻疹 | 仅演示 | 固定种子合成周病例，用于零值/稀疏压力测试 | 周病例 |

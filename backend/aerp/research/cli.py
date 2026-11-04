@@ -232,6 +232,26 @@ def cmd_nhsn_replay(args: argparse.Namespace) -> int:
     )
 
 
+def cmd_fetch_who(args: argparse.Namespace) -> int:
+    from aerp.db.session import SessionLocal, init_db
+    from aerp.services.geo_catalog import ensure_geo_catalog
+    from aerp.services.who_covid import fetch_and_import
+
+    init_db()
+    db = SessionLocal()
+    try:
+        ensure_geo_catalog(db)
+        return _print(
+            fetch_and_import(
+                db,
+                cache_dir=Path(args.cache_dir) if args.cache_dir else None,
+                max_weeks=args.max_weeks,
+            )
+        )
+    finally:
+        db.close()
+
+
 def cmd_transfer_demo(args: argparse.Namespace) -> int:
     del args
     frames = generate_paired_respiratory()
@@ -344,6 +364,11 @@ def build_parser() -> argparse.ArgumentParser:
     nhsn_replay.add_argument("--seed", type=int, default=42)
     nhsn_replay.add_argument("--max-origins", type=int, default=6)
     nhsn_replay.set_defaults(func=cmd_nhsn_replay)
+
+    who = sub.add_parser("fetch-who-covid", help="拉取 WHO COVID-19 国家日报告并聚合为周，失败不填补")
+    who.add_argument("--cache-dir")
+    who.add_argument("--max-weeks", type=int, default=52)
+    who.set_defaults(func=cmd_fetch_who)
     return parser
 
 

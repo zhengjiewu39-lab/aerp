@@ -1,0 +1,43 @@
+{
+  "boundary_version": "ne_110m_admin0-2024 + us-states-fips + small-points",
+  "fetched_at": "2026-10-23",
+  "license": "Natural Earth public domain; US states GeoJSON via PublicaMundi (derived from US Census TIGER, public domain).",
+  "political_note": "边界按所选数据集绘制，包括争议地区处理方式。本系统不表达主权立场。",
+  "projection_note": "前端默认 Web Mercator。极区面积与形状失真；南北约 85° 以外不保证可展示。跨日期变更线国家使用原数据集 MultiPolygon，不把几何静默丢弃。",
+  "sources": [
+    {
+      "id": "natural_earth_110m_admin0",
+      "name": "Natural Earth 110m Admin 0 Countries",
+      "url": "https://github.com/nvkelso/natural-earth-vector/blob/master/geojson/ne_110m_admin_0_countries.geojson",
+      "license": "public domain",
+      "sha256": "10c058fa0c352c74304cf5a7b4c5e4c2857e2a1cd3b98bb68f0b452b7b075a0a",
+      "bytes": 294412,
+      "n_features": 177,
+      "exceptions": {
+        "Norway": "ISO_A2=-99 in source; mapped via ISO_A2_EH=NO",
+        "France": "ISO_A2=-99 in source; mapped via ISO_A2_EH=FR",
+        "Kosovo": "ISO_A2=-99 in source; mapped to XK as exception, pending ISO status",
+        "Northern Cyprus": "kept as ne:CNX without ISO; disputed, listed in matching notes",
+        "Somaliland": "kept as ne:SOL without ISO; disputed, listed in matching notes"
+      }
+    },
+    {
+      "id": "publicamundi_us_states",
+      "name": "US states GeoJSON (FIPS ids)",
+      "url": "https://github.com/PublicaMundi/MappingAPI/blob/master/data/geojson/us-states.json",
+      "license": "public domain / US Census derived",
+      "sha256": "af925d5eb4054ce8838b56591487b8bb1dff35441021a72df7ca2f23fda09059",
+      "bytes": 98828,
+      "n_features": 52
+    },
+    {
+      "id": "small_country_points",
+      "name": "Representative points for ISO units missing from 110m polygons",
+      "license": "compiled coordinates for search/locate only",
+      "sha256": "7f70cd6f3e148886cc6fd1da90cedf94a22f0b8176dca2814274911d81e6812c",
+      "bytes": 15245,
+      "n_features": 31,
+      "note": "不是病例点。面状几何缺失时提供列表与定位，避免因简化边界静默丢失国家。"
+    }
+  ]
+}

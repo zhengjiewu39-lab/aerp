@@ -4,6 +4,7 @@ from collections.abc import Generator
 
 from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
+from sqlalchemy.pool import NullPool
 
 from aerp.config import get_settings
 
@@ -13,11 +14,11 @@ class Base(DeclarativeBase):
 
 
 settings = get_settings()
-engine = create_engine(
-    settings.database_url,
-    connect_args={"check_same_thread": False} if settings.database_url.startswith("sqlite") else {},
-    future=True,
-)
+_engine_kwargs: dict = {"future": True}
+if settings.database_url.startswith("sqlite"):
+    _engine_kwargs["connect_args"] = {"check_same_thread": False, "timeout": 60}
+    _engine_kwargs["poolclass"] = NullPool
+engine = create_engine(settings.database_url, **_engine_kwargs)
 
 
 @event.listens_for(engine, "connect")
@@ -40,7 +41,7 @@ def get_db() -> Generator[Session, None, None]:
 
 
 def init_db() -> None:
-    from aerp import db as _models  # noqa: F401
+    from aerp.db import models as _models  # noqa: F401
 
     Base.metadata.create_all(bind=engine)
     _ensure_region_context_column()

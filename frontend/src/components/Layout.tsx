@@ -1,9 +1,10 @@
-import { NavLink, Outlet } from "react-router-dom";
+import { NavLink, Outlet, useLocation } from "react-router-dom";
 import { Banner } from "./Banner";
 import { WorkspaceBar } from "./WorkspaceBar";
 
 const links = [
-  { to: "/", label: "多病种总览" },
+  { to: "/", label: "全球地图" },
+  { to: "/overview", label: "研究总览" },
   { to: "/disease", label: "疾病研究" },
   { to: "/forecasts", label: "预测比较" },
   { to: "/transfer", label: "跨疾病迁移" },
@@ -14,16 +15,22 @@ const links = [
 ];
 
 export function Layout({ banner }: { banner?: string }) {
+  const location = useLocation();
+  const isMap = location.pathname === "/";
   return (
-    <div className="min-h-screen bg-mist text-ink">
+    <div className={`bg-mist text-ink ${isMap ? "flex h-screen flex-col overflow-hidden" : "min-h-screen"}`}>
       <Banner text={banner} />
       <header className="border-b border-slate-200 bg-white">
-        <div className="mx-auto flex max-w-7xl flex-col gap-4 px-4 py-4 lg:flex-row lg:items-end lg:justify-between">
+        <div className={`mx-auto flex flex-col gap-2 px-4 py-2 lg:flex-row lg:items-end lg:justify-between ${isMap ? "max-w-none" : "max-w-7xl lg:gap-3 lg:py-3"}`}>
           <div>
             <div className="text-xs tracking-[0.2em] text-sea">AERP · 研究工作台</div>
-            <h1 className="font-display text-2xl tracking-tight text-ink md:text-3xl">多病种疫情预测研究平台</h1>
-            <p className="mt-1 max-w-2xl text-sm text-slate-600">
-              比较监测修订、地区共享与跨疾病迁移，而不把住院预测说成传播机制发现。
+            <h1 className={`font-display tracking-tight text-ink ${isMap ? "text-lg md:text-xl" : "text-xl md:text-2xl"}`}>
+              {isMap ? "全球交互式疾病地图工作台" : "多病种疫情预测研究平台"}
+            </h1>
+            <p className="mt-1 max-w-3xl text-sm text-slate-600">
+              {isMap
+                ? "全球底图完整不代表疾病数据完整。无数据、零值、过期和未报告分开显示。AI 草稿须人工确认。"
+                : "比较监测修订、地区共享与跨疾病迁移，而不把住院预测说成传播机制发现。"}
             </p>
           </div>
           <nav className="flex flex-wrap gap-2">
@@ -44,8 +51,8 @@ export function Layout({ banner }: { banner?: string }) {
           </nav>
         </div>
       </header>
-      <main className="mx-auto max-w-7xl px-4 py-6">
-        <WorkspaceBar />
+      <main className={isMap ? "mx-auto flex min-h-0 w-full max-w-none flex-1 flex-col overflow-hidden px-4 py-2" : "mx-auto max-w-7xl px-4 py-6"}>
+        {isMap ? null : <WorkspaceBar />}
         <Outlet />
       </main>
     </div>

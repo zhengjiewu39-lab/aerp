@@ -8,12 +8,16 @@ from sqlalchemy.orm import Session
 from aerp.config import get_settings
 from aerp.core.hashing import sha256_text
 from aerp.core.diseases import DISEASE_SPECS
+from aerp.core.geo import unit_records
 from aerp.core.synthetic import BATCH_ID, REGIONS, SOURCE_ID, generate_synthetic
 from aerp.core.synthetic_measles import BATCH_ID as MEASLES_BATCH
 from aerp.core.synthetic_measles import DISEASE_ID as MEASLES_ID
 from aerp.core.synthetic_measles import REGIONS as MEASLES_REGIONS
 from aerp.core.synthetic_measles import SOURCE_ID as MEASLES_SOURCE
 from aerp.core.synthetic_measles import generate_measles_demo
+from aerp.core.map_demo import BATCH_ID as MAP_DEMO_BATCH
+from aerp.core.map_demo import SOURCE_ID as MAP_DEMO_SOURCE
+from aerp.core.map_demo import generate_map_demo
 from aerp.core.timeutil import utcnow
 from aerp.db.models import (
     DataSource,
@@ -303,20 +307,122 @@ def seed_measles(db: Session, seed: int = 7, force: bool = False) -> dict:
     }
 
 
+def seed_map_demo(db: Session, seed: int | None = None, force: bool = False) -> dict:
+    """Country-polygon playback series. Isolated from real connectors. Always watermarked."""
+    settings = get_settings()
+    seed_value = int(settings.aerp_demo_seed if seed is None else seed)
+    existing = db.get(ImportBatch, MAP_DEMO_BATCH)
+    if existing and not force:
+        return {"seeded": False, "message": "地图演示时序已存在", "batch_id": MAP_DEMO_BATCH}
+    ensure_disease_registry(db)
+    db.query(ObservationVintage).filter(ObservationVintage.source_id == MAP_DEMO_SOURCE).delete()
+    for batch in list(db.scalars(select(ImportBatch).where(ImportBatch.source_id == MAP_DEMO_SOURCE)).all()):
+        db.delete(batch)
+    db.flush()
+    if db.get(DataSource, MAP_DEMO_SOURCE) is None:
+        db.add(
+            DataSource(
+                id=MAP_DEMO_SOURCE,
+                name="地图播放演示（合成）",
+                url="",
+                license="本仓库生成",
+                update_note="固定种子合成国家周病例，仅供地图时间轴演示，不是真实监测。",
+                connector_status="demo",
+            )
+        )
+    bundle = generate_map_demo(seed=seed_value)
+    names = {item["geo_id"]: item.get("name") or item["geo_id"] for item in unit_records()}
+    for region_id in bundle.observations["region_id"].astype(str).unique():
+        if db.get(Region, region_id) is None:
+            db.add(
+                Region(
+                    id=region_id,
+                    name=str(names.get(region_id, region_id)),
+                    scenario="map_demo",
+                    note="地图演示用国家码，不是病例点。",
+                )
+            )
+    db.flush()
+    payload_hash = sha256_text(bundle.observations.to_json(orient="records", date_format="iso"))
+    db.add(
+        ImportBatch(
+            id=MAP_DEMO_BATCH,
+            source_id=MAP_DEMO_SOURCE,
+            file_hash=payload_hash,
+            filename=f"map_demo_{seed_value}.json",
+            imported_at=utcnow(),
+            row_count=int(len(bundle.observations)),
+            note=bundle.note,
+            is_synthetic=True,
+        )
+    )
+    db.flush()
+    for row in bundle.observations.itertuples(index=False):
+        db.add(
+            ObservationVintage(
+                disease_id=row.disease_id,
+                region_id=row.region_id,
+                period_start=row.period_start.to_pydatetime(),
+                period_end=row.period_end.to_pydatetime(),
+                issued_at=row.issued_at.to_pydatetime(),
+                metric=row.metric,
+                value=_finite_or_none(row.value),
+                unit=row.unit,
+                source_id=row.source_id,
+                quality_flag=row.quality_flag,
+                import_batch_id=MAP_DEMO_BATCH,
+            )
+        )
+    db.commit()
+    return {
+        "seeded": True,
+        "message": bundle.note,
+        "batch_id": MAP_DEMO_BATCH,
+        "n_observations": int(len(bundle.observations)),
+        "n_countries": bundle.n_countries,
+        "n_weeks": bundle.n_weeks,
+        "is_synthetic": True,
+    }
+
+
+def _try_who_cache(db: Session) -> None:
+    """Import WHO COVID only if a local cache already exists. Never fabricate rows."""
+    from aerp.config import ROOT
+    from aerp.services.who_covid import SOURCE_ID, fetch_and_import
+
+    if db.scalar(select(ImportBatch.id).where(ImportBatch.source_id == SOURCE_ID)):
+        return
+    cache = ROOT / "data" / "raw" / "who_covid19_global.csv"
+    if not cache.exists():
+        return
+    try:
+        fetch_and_import(db)
+    except Exception:
+        return
+
+
 def ensure_seeded(db: Session) -> None:
     settings = get_settings()
     ensure_disease_registry(db)
     db.commit()
+    from aerp.services.geo_catalog import ensure_geo_catalog
+
+    ensure_geo_catalog(db)
     if not settings.aerp_auto_seed:
         return
     if db.scalar(select(ImportBatch.id).where(ImportBatch.id == BATCH_ID)):
         if db.get(Region, "R5") is None:
             seed_synthetic(db, seed=settings.aerp_demo_seed, force=True, replace=True)
             seed_measles(db, force=False)
+            seed_map_demo(db)
             return
         refresh_region_context(db)
         seed_measles(db, force=False)
         db.commit()
+        _try_who_cache(db)
+        seed_map_demo(db)
         return
     seed_synthetic(db, seed=settings.aerp_demo_seed)
     seed_measles(db, force=False)
+    _try_who_cache(db)
+    seed_map_demo(db)

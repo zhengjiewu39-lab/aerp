@@ -1,0 +1,50 @@
+Date_reported,Country_code,Country,WHO_region,New_cases,Cumulative_cases,New_deaths,Cumulative_deaths
+2024-02-25,US,United States of America,AMRO,100,1000,2,20
+2024-02-26,US,United States of America,AMRO,80,1080,1,21
+2024-02-27,US,United States of America,AMRO,90,1170,0,21
+2024-02-28,US,United States of America,AMRO,70,1240,1,22
+2024-02-29,US,United States of America,AMRO,60,1300,0,22
+2024-03-01,US,United States of America,AMRO,50,1350,1,23
+2024-03-02,US,United States of America,AMRO,40,1390,0,23
+2024-03-03,US,United States of America,AMRO,30,1420,0,23
+2024-03-04,US,United States of America,AMRO,20,1440,0,23
+2024-03-05,US,United States of America,AMRO,10,1450,0,23
+2024-03-06,US,United States of America,AMRO,10,1460,0,23
+2024-03-07,US,United States of America,AMRO,10,1470,0,23
+2024-03-08,US,United States of America,AMRO,10,1480,0,23
+2024-03-09,US,United States of America,AMRO,10,1490,0,23
+2024-02-25,BR,Brazil,AMRO,0,500,0,10
+2024-02-26,BR,Brazil,AMRO,0,500,0,10
+2024-02-27,BR,Brazil,AMRO,0,500,0,10
+2024-02-28,BR,Brazil,AMRO,0,500,0,10
+2024-02-29,BR,Brazil,AMRO,0,500,0,10
+2024-03-01,BR,Brazil,AMRO,0,500,0,10
+2024-03-02,BR,Brazil,AMRO,0,500,0,10
+2024-03-03,BR,Brazil,AMRO,5,505,0,10
+2024-03-04,BR,Brazil,AMRO,5,510,0,10
+2024-03-05,BR,Brazil,AMRO,5,515,0,10
+2024-03-06,BR,Brazil,AMRO,5,520,0,10
+2024-03-07,BR,Brazil,AMRO,5,525,0,10
+2024-03-08,BR,Brazil,AMRO,5,530,0,10
+2024-03-09,BR,Brazil,AMRO,5,535,0,10
+2024-02-25,FJ,Fiji,WPRO,2,20,0,1
+2024-02-26,FJ,Fiji,WPRO,1,21,0,1
+2024-02-27,FJ,Fiji,WPRO,1,22,0,1
+2024-02-28,FJ,Fiji,WPRO,1,23,0,1
+2024-02-29,FJ,Fiji,WPRO,0,23,0,1
+2024-03-01,FJ,Fiji,WPRO,0,23,0,1
+2024-03-02,FJ,Fiji,WPRO,0,23,0,1
+2024-02-25,RU,Russian Federation,EURO,12,200,1,8
+2024-02-26,RU,Russian Federation,EURO,8,208,0,8
+2024-02-27,RU,Russian Federation,EURO,9,217,0,8
+2024-02-28,RU,Russian Federation,EURO,7,224,0,8
+2024-02-29,RU,Russian Federation,EURO,6,230,0,8
+2024-03-01,RU,Russian Federation,EURO,5,235,0,8
+2024-03-02,RU,Russian Federation,EURO,4,239,0,8
+2024-03-03,RU,Russian Federation,EURO,3,242,0,8
+2024-03-04,RU,Russian Federation,EURO,3,245,0,8
+2024-03-05,RU,Russian Federation,EURO,2,247,0,8
+2024-03-06,RU,Russian Federation,EURO,2,249,0,8
+2024-03-07,RU,Russian Federation,EURO,1,250,0,8
+2024-03-08,RU,Russian Federation,EURO,1,251,0,8
+2024-03-09,RU,Russian Federation,EURO,1,252,0,8

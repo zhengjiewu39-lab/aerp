@@ -54,6 +54,13 @@ CONNECTORS = [
         "note": "研究扩展接口预留。第一版未配置。",
     },
     {
+        "id": "who_covid19",
+        "name": "WHO COVID-19 国家日报告（周聚合）",
+        "status": "unverified",
+        "url": "https://data.who.int/dashboards/covid19/data",
+        "note": "国家级报告新增病例/死亡，不是住院或感染人数。拉取失败时国家层保持无数据，不填演示数字。",
+    },
+    {
         "id": "dengue_paho",
         "name": "登革热来源核查（PAHO/WHO）",
         "status": "unverified",
@@ -77,6 +84,10 @@ def list_connectors() -> list[dict]:
         row = dict(item)
         if row["id"] == "delphi_epidata":
             row.update(delphi_status())
+        if row["id"] == "who_covid19":
+            from aerp.services.who_covid import connector_status as who_status
+
+            row.update({k: v for k, v in who_status().items() if k in {"status", "note", "url"}})
         if row["id"] == "dengue_paho":
             from aerp.services.dengue import adapter_status
 

@@ -31,7 +31,7 @@ build-backend = "setuptools.build_meta"
 include = ["aerp*"]
 
 [tool.setuptools.package-data]
-aerp = ["data/*.csv"]
+aerp = ["data/*.csv", "data/geo/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

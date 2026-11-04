@@ -105,7 +105,7 @@ def test_disease_specs_keep_four_statuses():
     assert specs["measles"]["status"] == "demo_only"
     assert specs["dengue"]["status"] == "pending"
     assert specs["smallpox"]["trainable"] is False
-    assert get_disease("covid19").default_target == "hospital_admissions"
+    assert get_disease("covid19").default_target == "weekly_cases"
 
 
 def test_transfer_excludes_target_future_and_compares_three_arms():
