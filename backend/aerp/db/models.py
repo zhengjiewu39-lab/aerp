@@ -352,6 +352,21 @@ class AnalysisRevision(Base):
     created_by: Mapped[str] = mapped_column(String(128), default="")
 
 
+class AiCallLog(Base):
+    __tablename__ = "ai_call_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    provider: Mapped[str] = mapped_column(String(64))
+    model: Mapped[str] = mapped_column(String(128), default="")
+    ok: Mapped[bool] = mapped_column(Boolean, default=False)
+    live_verified: Mapped[bool] = mapped_column(Boolean, default=False)
+    request_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    error: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    note: Mapped[str] = mapped_column(Text, default="")
+
+
 class ReviewDecision(Base):
     __tablename__ = "review_decisions"
 

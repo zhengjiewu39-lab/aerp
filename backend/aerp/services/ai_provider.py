@@ -38,7 +38,7 @@ def _redact(text: str, secret: str) -> str:
     return text.replace(secret, "[redacted]")
 
 
-def provider_status() -> dict[str, Any]:
+def provider_status(db=None) -> dict[str, Any]:
     settings = get_settings()
     provider = (settings.aerp_ai_provider or "").strip().lower()
     has_key = bool(settings.aerp_ai_api_key)
@@ -46,17 +46,19 @@ def provider_status() -> dict[str, Any]:
     mock_allowed = bool(settings.aerp_ai_allow_mock)
     configured = False
     reason = ""
-    live_verified = False
+    state = "unconfigured"
     if provider in {"mock", "test"}:
         if mock_allowed:
             configured = True
-            reason = "测试桩 mock，仅测试环境使用。"
+            state = "test_stub"
+            reason = "测试桩 mock，仅测试环境使用，不能用于真实分析。"
         else:
             reason = "mock 未启用（需要 AERP_AI_ALLOW_MOCK=true），不会用模板冒充真实模型。"
     elif provider in {"openai", "openai_compat", "openai-compatible"}:
         if has_key and has_model:
             configured = True
-            reason = "已配置 OpenAI 兼容 Chat Completions 接口。尚未在本进程完成真实连通验证。"
+            state = "configured_unverified"
+            reason = "已配置 OpenAI 兼容接口，尚未根据真实调用记录验证。"
         elif not has_key:
             reason = "未设置 AERP_AI_API_KEY。"
         else:
@@ -65,6 +67,30 @@ def provider_status() -> dict[str, Any]:
         reason = "未配置 AERP_AI_PROVIDER。AI 未配置。"
     else:
         reason = f"未知 provider={provider}。"
+    last = None
+    if db is not None:
+        from sqlalchemy import select
+
+        from aerp.db.models import AiCallLog
+
+        last = db.scalars(select(AiCallLog).order_by(AiCallLog.created_at.desc())).first()
+    live_verified = False
+    last_payload = None
+    if last is not None:
+        last_payload = {
+            "created_at": last.created_at.isoformat() if last.created_at else None,
+            "model": last.model,
+            "request_id": last.request_id,
+            "ok": last.ok,
+            "live_verified": last.live_verified,
+        }
+        if last.live_verified and last.ok:
+            live_verified = True
+            state = "live_verified"
+            reason = f"最近真实调用成功：{last.created_at} · {last.model} · {last.request_id or '无供应商请求ID'}"
+        elif last.error or not last.ok:
+            state = "call_failed" if configured else state
+            reason = f"最近调用失败：{last.error or last.note}"
     return {
         "configured": configured,
         "provider": provider or None,
@@ -74,10 +100,13 @@ def provider_status() -> dict[str, Any]:
         "timeout_seconds": settings.aerp_ai_timeout_seconds,
         "max_retries": settings.aerp_ai_max_retries,
         "live_verified": live_verified,
+        "state": state,
+        "last_call": last_payload,
         "message": "AI未配置/调用失败" if not configured else reason,
         "reason": reason,
         "docs": "https://platform.openai.com/docs/api-reference/chat",
         "identity_note": IDENTITY_NOTE,
+        "probe_available": configured and provider not in {"mock", "test"},
     }
 
 
@@ -163,6 +192,7 @@ def _openai_compat_complete(evidence: dict[str, Any]) -> dict[str, Any]:
                 "usage": data.get("usage") or {},
                 "live_verified": True,
                 "http_status": 200,
+                "request_id": data.get("id"),
             }
         except HTTPError as exc:
             detail = _redact(exc.read().decode("utf-8", errors="replace") if exc.fp else str(exc), settings.aerp_ai_api_key)

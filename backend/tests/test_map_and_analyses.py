@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, select
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -155,7 +155,7 @@ def test_map_detail_matches_export_snapshot(client: TestClient):
     us = next(item for item in world["features"] if item["geo_id"] == "iso3166-1:US")
     detail = client.get(
         "/api/map/regions/iso3166-1:US",
-        params={"disease_id": "covid19", "metric": "weekly_cases", "period_end": "2024-03-02"},
+        params={"disease_id": "covid19", "metric": "weekly_cases", "period_end": "2024-03-02", "view": "rate_per_100k"},
     ).json()
     assert (detail.get("current") or {}).get("count") == us.get("count")
     assert detail["snapshot_hash"] == world["snapshot_hash"]
@@ -291,90 +291,223 @@ def test_manual_analysis_not_labelled_ai(client: TestClient):
     assert reject.json()["status"] == "rejected"
 
 
-def test_map_demo_playback_does_not_replace_who_covid(client: TestClient):
+def test_real_mode_does_not_fallback_or_switch_metric(client: TestClient):
     db = db_session.SessionLocal()
     seed_map_demo(db)
     db.close()
     covid = client.get(
         "/api/map/observations",
-        params={"disease_id": "covid19", "metric": "weekly_cases", "view": "count", "period_end": "2024-03-02"},
+        params={"disease_id": "covid19", "metric": "weekly_cases", "view": "count", "period_end": "2024-03-02", "data_mode": "real"},
     ).json()
+    assert covid.get("is_demo") is False
     assert covid.get("watermark") in {None, ""}
     assert "who_covid19" in (covid.get("legend") or {}).get("sources", [])
     flu = client.get(
         "/api/map/observations",
-        params={"disease_id": "influenza", "metric": "weekly_cases", "view": "rate_per_100k"},
+        params={"disease_id": "influenza", "metric": "weekly_cases", "view": "rate_per_100k", "data_mode": "real"},
     ).json()
-    assert flu.get("is_demo") is True
-    assert flu.get("watermark")
-    assert len(flu.get("periods") or []) >= 8
-    first_end = flu["periods"][max(0, len(flu["periods"]) // 4)]["period_end"]
-    last_end = flu["periods"][-1]["period_end"]
-    early = client.get(
+    assert flu.get("is_demo") is False
+    assert flu["metric"] == "weekly_cases"
+    assert flu.get("suggested_metric") == "hospital_admissions"
+    hosp = client.get(
         "/api/map/observations",
-        params={"disease_id": "influenza", "metric": "weekly_cases", "view": "count", "period_end": first_end, "lock_period_end": last_end},
+        params={"disease_id": "covid19", "metric": "hospital_admissions", "view": "count", "data_mode": "real"},
     ).json()
-    late = client.get(
-        "/api/map/observations",
-        params={"disease_id": "influenza", "metric": "weekly_cases", "view": "count", "period_end": last_end, "lock_period_end": last_end},
-    ).json()
-    assert early["classification"]["breaks"] == late["classification"]["breaks"]
-
-    def counts(payload: dict) -> dict[str, float]:
-        return {
-            item["geo_id"]: float(item["count"])
-            for item in payload["features"]
-            if item.get("count") is not None and item.get("data_status") not in {"no_data", "unreported"}
-        }
-
-    early_counts = counts(early)
-    late_counts = counts(late)
-    shared = set(early_counts) | set(late_counts)
-    assert early_counts or late_counts
-    assert any(early_counts.get(geo, 0) != late_counts.get(geo, 0) for geo in shared)
-    dengue = client.get(
-        "/api/map/observations",
-        params={"disease_id": "dengue", "metric": "weekly_cases", "view": "count"},
-    ).json()
-    assert dengue.get("is_demo") is True
-    assert len(dengue.get("periods") or []) >= 8
-    stale = client.get(
-        "/api/map/observations",
-        params={"disease_id": "influenza", "metric": "weekly_deaths", "view": "rate_per_100k", "period_end": "2026-08-29"},
-    ).json()
-    assert stale.get("is_demo") is True
-    assert stale["metric"] == "weekly_cases"
-    assert stale["period_clamped"] is True
-    assert str(stale["period_end"]).startswith("2023")
-    valued = [
+    assert hosp["metric"] == "hospital_admissions"
+    assert "住院" in (hosp.get("note") or "")
+    colored = [
         item
-        for item in stale["features"]
-        if item.get("value") is not None and item.get("data_status") not in {"no_data", "unreported"}
+        for item in covid["features"]
+        if item.get("count") not in (None, 0) and item.get("color") not in {None, "#c5cbd3", "#d9dee6"}
     ]
-    assert len(valued) >= 8
+    assert colored, "真实模式报告人数图层应有可着色国家"
+    demo = client.get(
+        "/api/map/observations",
+        params={"disease_id": "influenza", "metric": "weekly_cases", "view": "count", "data_mode": "demo"},
+    ).json()
+    assert demo.get("is_demo") is True
+    labels = (covid.get("classification") or {}).get("labels") or []
+    assert "非常严重" not in labels
+    assert covid["classification"]["is_official_severity"] is False
 
 
-def test_burden_labels_and_absolute_class_mode(client: TestClient):
-    relative = client.get(
+def test_source_conflict_keeps_both(client: TestClient):
+    from datetime import datetime
+
+    from aerp.db.models import DataSource, ObservationVintage, Region
+
+    db = db_session.SessionLocal()
+    if db.get(DataSource, "alt_test") is None:
+        db.add(DataSource(id="alt_test", name="alt", url="", license="", update_note="", connector_status="test"))
+    if db.get(Region, "US") is None:
+        db.add(Region(id="US", name="United States"))
+    db.add(
+        ObservationVintage(
+            disease_id="covid19",
+            region_id="US",
+            period_start=datetime(2024, 2, 25),
+            period_end=datetime(2024, 3, 2),
+            issued_at=datetime(2024, 3, 3),
+            metric="weekly_cases",
+            value=99999,
+            unit="cases",
+            source_id="alt_test",
+            quality_flag="reported",
+            import_batch_id=db.scalars(select(ObservationVintage)).first().import_batch_id,
+        )
+    )
+    db.commit()
+    db.close()
+    world = client.get(
         "/api/map/observations",
-        params={"disease_id": "covid19", "metric": "weekly_cases", "view": "rate_per_100k", "period_end": "2024-03-02", "class_mode": "quantile"},
+        params={"disease_id": "covid19", "metric": "weekly_cases", "view": "count", "period_end": "2024-03-02", "data_mode": "real"},
     ).json()
-    assert relative["classification"]["labels"] == ["轻微", "一般", "较重", "严重", "非常严重"]
-    assert relative["classification"]["is_official_severity"] is False
-    assert "官方" in relative["classification"]["note"] or "临床" in relative["classification"]["note"]
-    hist = {item["label"]: item["n"] for item in relative["class_histogram"]}
-    assert "非常严重" in hist
-    assert sum(hist.values()) == len(relative["features"])
-    us = next(item for item in relative["features"] if item["geo_id"] == "iso3166-1:US")
-    assert us.get("trend_dir") in {"up", "down", "stable", "unknown"}
-    absolute = client.get(
+    us = next(item for item in world["features"] if item["geo_id"] == "iso3166-1:US")
+    assert us["source_id"] == "who_covid19"
+    assert us["count"] != 99999
+    assert us.get("source_conflicts")
+
+
+def test_zero_rate_not_replaced_by_count(client: TestClient):
+    from aerp.db.models import PopulationEstimate
+    from aerp.services.analyses import build_evidence_pack
+
+    db = db_session.SessionLocal()
+    for row in list(db.scalars(select(PopulationEstimate)).all()):
+        db.delete(row)
+    db.commit()
+    pack = build_evidence_pack(
+        db, disease_id="covid19", geo_id="iso3166-1:US", metric="weekly_cases", period_end="2024-03-02", view="count"
+    )
+    obs = next(item for item in pack["evidence"] if item["kind"] == "observation")
+    assert obs.get("rate_per_100k") is None
+    assert obs.get("value") is not None
+    db.close()
+
+
+def test_confirmed_cannot_be_rejected(client: TestClient):
+    created = client.post(
+        "/api/analyses/manual",
+        json={
+            "disease_id": "covid19",
+            "geo_id": "iso3166-1:US",
+            "metric": "weekly_cases",
+            "period_end": "2024-03-02",
+            "view": "count",
+            "as_draft": False,
+            "structured": {
+                "summary": "见证据。",
+                "observations": [{"text": "见 e1", "evidence_ids": ["e1"]}],
+                "possible_explanations": [{"text": "未知", "evidence_ids": ["e1"]}],
+                "uncertainties": [{"text": "夹具", "evidence_ids": ["e1"]}],
+                "data_quality_issues": [{"text": "夹具", "evidence_ids": ["e1"]}],
+                "suggested_checks": [{"text": "核对", "evidence_ids": ["e1"]}],
+                "citations": [{"evidence_id": "e1", "note": "x"}],
+            },
+        },
+    )
+    body = created.json()
+    if body.get("status") != "confirmed":
+        confirm = client.post(
+            f"/api/analyses/{body['id']}/review",
+            json={
+                "action": "edit_confirm" if body.get("status") == "needs_correction" else "confirm",
+                "expected_revision_id": body["current_revision_id"],
+                "snapshot_hash": body["snapshot_hash"],
+                "edited": body.get("current", {}).get("structured"),
+            },
+        )
+        body = confirm.json()
+    assert body["status"] == "confirmed"
+    reject = client.post(
+        f"/api/analyses/{body['id']}/review",
+        json={
+            "action": "reject",
+            "expected_revision_id": body["current_revision_id"],
+            "snapshot_hash": body["snapshot_hash"],
+        },
+    )
+    assert reject.status_code == 409
+    stale = client.post(
+        f"/api/analyses/{body['id']}/review",
+        json={
+            "action": "confirm",
+            "expected_revision_id": body["current_revision_id"],
+            "snapshot_hash": "expired",
+        },
+    )
+    assert stale.status_code == 409
+
+
+def test_who_territories_are_points_not_parent_fill(client: TestClient):
+    from aerp.core.geo import WHO_NONGEO_CODES
+    from aerp.services.geo_catalog import resolve_geo_id, reviewed_mapping_index
+
+    db = db_session.SessionLocal()
+    idx = reviewed_mapping_index(db)
+    gu, method = resolve_geo_id(db, "GU", source_id="who_covid19", mapping_index=idx)
+    xf, xf_method = resolve_geo_id(db, "XF", source_id="who_covid19", mapping_index=idx)
+    db.close()
+    assert gu == "iso3166-1:GU"
+    assert method in {"source_code", "iso2"}
+    assert xf is None
+    assert "XF" in WHO_NONGEO_CODES
+    units = client.get("/api/geo/units", params={"level": "country"}).json()
+    gu_row = next(item for item in units["items"] if item["geo_id"] == "iso3166-1:GU")
+    assert gu_row["representative_point"] is True
+    world = client.get(
+        "/api/geo/boundaries",
+        params={"level": "country"},
+    ).json()
+    assert not any(item["properties"]["geo_id"] == "iso3166-1:GU" for item in world["geojson"]["features"])
+    assert any(item["properties"]["geo_id"] == "iso3166-1:GU" for item in world["points"]["features"])
+
+
+def test_comparability_replay_does_not_invent_transmission_accuracy(client: TestClient):
+    payload = client.get(
+        "/api/map/comparability-replay",
+        params={"disease_id": "covid19", "metric": "weekly_cases", "period_end": "2024-03-09", "previous_period_end": "2024-03-02", "view": "count"},
+    ).json()
+    assert payload["transmission_accuracy"]["status"] == "skipped"
+    assert payload["transmission_accuracy"]["accuracy"] is None
+    assert payload["n_valued"] >= 1
+    assert "传播" in payload["note"]
+
+
+def test_flunet_global_detections_do_not_use_us_hospital(client: TestClient):
+    from aerp.services.who_flunet import import_fixture as import_flunet
+
+    db = db_session.SessionLocal()
+    imported = import_flunet(db)
+    db.close()
+    assert imported["status"] in {"success", "exists"}
+    flu = client.get(
         "/api/map/observations",
-        params={"disease_id": "covid19", "metric": "weekly_cases", "view": "rate_per_100k", "period_end": "2024-03-02", "class_mode": "absolute"},
+        params={"disease_id": "influenza", "metric": "lab_detections", "view": "count", "data_mode": "real", "time_mode": "unified"},
     ).json()
-    assert absolute["classification"]["method"] == "absolute_rate_research"
-    assert absolute["classification"]["breaks"][:5] == [0.0, 1.0, 5.0, 15.0, 40.0]
-    later = client.get(
+    by_id = {item["geo_id"]: item for item in flu["features"]}
+    assert by_id["iso3166-1:FR"]["data_status"] in {"reported", "zero"}
+    assert by_id["iso3166-1:JP"]["count"] > 0
+    assert "who_flunet" in ((flu.get("legend") or {}).get("sources") or [])
+    rsv = client.get(
         "/api/map/observations",
-        params={"disease_id": "covid19", "metric": "weekly_cases", "view": "rate_per_100k", "period_end": "2024-03-09", "class_mode": "absolute"},
+        params={"disease_id": "rsv", "metric": "lab_detections", "view": "count", "data_mode": "real", "time_mode": "unified"},
     ).json()
-    assert later["classification"]["breaks"] == absolute["classification"]["breaks"]
+    rsv_by = {item["geo_id"]: item for item in rsv["features"]}
+    assert rsv_by["iso3166-1:FR"]["data_status"] == "reported"
+    assert not any(geo.startswith("iso3166-2:") for geo in rsv_by if rsv_by[geo].get("count") is not None)
+
+
+def test_pick_default_period_skips_trailing_stub_week():
+    import pandas as pd
+    from aerp.services.map_data import _pick_default_period
+
+    frame = pd.DataFrame(
+        {
+            "period_end": ["2024-03-02"] * 8 + ["2024-03-09"] * 2,
+            "region_id": list("abcdefgh") + ["a", "b"],
+            "value": [1.0] * 8 + [None, 0.0],
+            "quality_flag": ["ok"] * 8 + ["unreported", "ok"],
+        }
+    )
+    assert str(_pick_default_period(frame, demo=False))[:10] == "2024-03-02"

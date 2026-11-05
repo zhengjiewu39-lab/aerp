@@ -7,15 +7,31 @@ import { Loading } from "../components/Loading";
 import { MapCanvas } from "./MapCanvas";
 
 const VIEWS = [
-  { id: "rate_per_100k", label: "每10万人" },
   { id: "count", label: "报告人数" },
+  { id: "rate_per_100k", label: "每10万人" },
   { id: "wow_change", label: "趋势变化" },
 ];
 
-const CLASS_MODES = [
-  { id: "quantile", label: "相对档（本图内比较）" },
-  { id: "absolute", label: "固定档（每10万区间）" },
-];
+function preferredMetric(spec: any, current?: string, parent?: string) {
+  const id = spec?.id || spec?.disease_id;
+  const targets = (spec?.targets || []).filter((item: string) => item !== "threshold_risk");
+  const coverage = (spec?.coverage?.metrics || []).filter((item: string) => item !== "threshold_risk");
+  const available = [...new Set([...targets, ...coverage])];
+  if (id === "influenza" || id === "rsv") {
+    if (!parent && available.includes("lab_detections")) return "lab_detections";
+    if (parent && available.includes("hospital_admissions")) return "hospital_admissions";
+    if (current && available.includes(current)) return current;
+    return available[0] || "lab_detections";
+  }
+  if (current && available.includes(current) && (targets.includes(current) || coverage.includes(current))) return current;
+  const def = spec?.default_target;
+  if (def && available.includes(def)) return def;
+  if (id === "covid19" && available.includes("weekly_cases")) return "weekly_cases";
+  if (available.includes("hospital_admissions")) return "hospital_admissions";
+  return available[0] || "weekly_cases";
+}
+
+const WORKBENCH_DISEASES = new Set(["covid19", "influenza", "rsv"]);
 
 function trendMark(dir: string | undefined) {
   if (dir === "up") return "↑";
@@ -47,7 +63,7 @@ export function MapWorkbench() {
   const [analyses, setAnalyses] = useState<any[]>([]);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
-  const [hover, setHover] = useState<any>(null);
+  const [listFilter, setListFilter] = useState<"value" | "all">("value");
   const [search, setSearch] = useState("");
   const [searchHits, setSearchHits] = useState<any[]>([]);
   const [leftOpen, setLeftOpen] = useState(true);
@@ -63,25 +79,26 @@ export function MapWorkbench() {
 
   const diseaseId = params.get("disease") || "covid19";
   const metric = params.get("metric") || "weekly_cases";
-  const view = params.get("view") || "rate_per_100k";
-  const timeMode = params.get("time") || "unified";
+  const view = params.get("view") || "count";
+  const timeMode = params.get("time") || "latest";
   const period = params.get("period") || "";
   const geoId = params.get("geo") || "";
   const parent = params.get("parent") || "";
-  const layer = params.get("layer") || "obs";
-  const classMode = params.get("class") || "quantile";
+  const dataMode = params.get("mode") || "real";
   const lastDisease = useRef(diseaseId);
 
   const setQuery = useCallback(
     (patch: Record<string, string | null>) => {
-      const next = new URLSearchParams(params);
-      for (const [key, value] of Object.entries(patch)) {
-        if (!value) next.delete(key);
-        else next.set(key, value);
-      }
-      setParams(next, { replace: true });
+      setParams((prev) => {
+        const next = new URLSearchParams(prev);
+        for (const [key, value] of Object.entries(patch)) {
+          if (!value) next.delete(key);
+          else next.set(key, value);
+        }
+        return next;
+      }, { replace: true });
     },
-    [params, setParams],
+    [setParams],
   );
 
   useEffect(() => {
@@ -91,35 +108,52 @@ export function MapWorkbench() {
   }, []);
 
   useEffect(() => {
-    if (lastDisease.current === diseaseId) return;
-    lastDisease.current = diseaseId;
-    lockPeriod.current = undefined;
-    setPlaying(false);
+    if (!diseases.length) return;
     const spec = diseases.find((item) => item.id === diseaseId);
-    const available = spec?.coverage?.metrics?.length ? spec.coverage.metrics : spec?.targets || ["weekly_cases"];
-    const nextMetric = available.includes("weekly_cases") ? "weekly_cases" : (available.includes(metric) ? metric : available[0] || "weekly_cases");
-    setQuery({ period: null, geo: null, parent: null, metric: nextMetric });
-  }, [diseaseId, diseases, metric, setQuery]);
+    const nextMetric = preferredMetric(spec, metric, parent);
+    if (lastDisease.current !== diseaseId) {
+      lastDisease.current = diseaseId;
+      lockPeriod.current = undefined;
+      setPlaying(false);
+      setQuery({ period: null, geo: null, parent: null, metric: preferredMetric(spec, undefined, undefined) });
+      return;
+    }
+    if (nextMetric !== metric) setQuery({ metric: nextMetric });
+  }, [diseaseId, diseases, metric, parent, setQuery]);
 
   useEffect(() => {
     const current = ++gen.current;
     const ctrl = new AbortController();
     setLoading(true);
-    const q: Record<string, string> = { disease_id: diseaseId, metric, view, time_mode: timeMode, class_mode: classMode };
+    const q: Record<string, string> = { disease_id: diseaseId, metric, view, time_mode: timeMode, data_mode: dataMode };
     if (period) q.period_end = period;
     if (parent) q.parent_geo_id = parent;
-    if (classMode === "quantile" && lockPeriod.current) q.lock_period_end = lockPeriod.current;
+    if (playing && lockPeriod.current) q.lock_period_end = lockPeriod.current;
     api
       .mapObservations(q, { signal: ctrl.signal })
       .then((payload) => {
         if (current !== gen.current) return;
         setObs(payload);
+        if (payload.coverage) setCoverage(payload.coverage);
         setError("");
-        if (classMode === "quantile" && !lockPeriod.current && payload.period_end) lockPeriod.current = payload.period_end;
+        if (!lockPeriod.current && payload.period_end) lockPeriod.current = payload.period_end;
         const ends = (payload.periods || []).map((item: any) => item.period_end);
         const patch: Record<string, string | null> = {};
         if ((!period || (ends.length && !ends.includes(period))) && payload.period_end) patch.period = payload.period_end;
-        if (payload.metric && payload.metric !== metric) patch.metric = payload.metric;
+        if (payload.switch_view && view === "rate_per_100k") patch.view = payload.switch_view;
+        const spec = diseases.find((item) => item.id === diseaseId);
+        const targets = spec?.targets || [];
+        if (
+          payload.suggested_metric &&
+          payload.suggested_metric !== metric &&
+          (!targets.length || !targets.includes(metric)) &&
+          !(payload.features || []).some((item: any) => item.count != null && item.data_status === "reported")
+        ) {
+          patch.metric = payload.suggested_metric;
+        }
+        if (payload.suggested_metric && payload.suggested_metric !== metric && metric === "hospital_admissions" && !parent) {
+          patch.metric = payload.suggested_metric;
+        }
         if (Object.keys(patch).length) setQuery(patch);
       })
       .catch((err) => {
@@ -130,9 +164,8 @@ export function MapWorkbench() {
       .finally(() => {
         if (current === gen.current) setLoading(false);
       });
-    api.mapCoverage({ disease_id: diseaseId, metric }).then(setCoverage).catch(() => undefined);
     return () => ctrl.abort();
-  }, [diseaseId, metric, view, timeMode, period, parent, classMode]);
+  }, [diseaseId, metric, view, timeMode, period, parent, dataMode, playing, setQuery]);
 
   useEffect(() => {
     if (!parent) {
@@ -183,11 +216,19 @@ export function MapWorkbench() {
     return () => clearTimeout(handle);
   }, [search]);
 
-  const ranked = useMemo(() => {
-    return [...(obs?.features || [])]
-      .filter((item) => item.value != null && item.data_status !== "no_data")
-      .sort((a, b) => Number(b.value) - Number(a.value));
-  }, [obs]);
+  const regionList = useMemo(() => {
+    const rank: Record<string, number> = { reported: 0, stale: 1, partial: 2, zero: 3, unreported: 4, no_data: 5 };
+    const rows = [...(obs?.features || [])].sort((a, b) => {
+      const d = (rank[a.data_status] ?? 9) - (rank[b.data_status] ?? 9);
+      if (d) return d;
+      return String(a.name || a.geo_id).localeCompare(String(b.name || b.geo_id), "zh");
+    });
+    if (listFilter === "value") {
+      return rows.filter((item) => ["reported", "zero", "stale", "partial"].includes(item.data_status));
+    }
+    return rows;
+  }, [obs, listFilter]);
+  const comparableCount = (obs?.features || []).filter((item: any) => item.rank_eligible).length;
   const selectedFeature = useMemo(
     () => (obs?.features || []).find((item: any) => item.geo_id === geoId) || null,
     [obs, geoId],
@@ -306,7 +347,10 @@ export function MapWorkbench() {
     URL.revokeObjectURL(url);
   }
 
-  const metrics = disease?.coverage?.metrics?.length ? disease.coverage.metrics : disease?.targets || ["weekly_cases"];
+  const mapDiseases = diseases.filter((item) => WORKBENCH_DISEASES.has(item.id) && !item.is_synthetic);
+  const metrics = (disease?.coverage?.metrics?.length ? disease.coverage.metrics : disease?.targets || ["weekly_cases"]).filter(
+    (item: string) => item !== "threshold_risk",
+  );
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-hidden">
@@ -317,11 +361,9 @@ export function MapWorkbench() {
             lockPeriod.current = undefined;
             setPlaying(false);
             const next = diseases.find((item) => item.id === ev.target.value);
-            const available = next?.coverage?.metrics?.length ? next.coverage.metrics : next?.targets || ["weekly_cases"];
-            const nextMetric = available.includes("weekly_cases") ? "weekly_cases" : (available[0] || "weekly_cases");
-            setQuery({ disease: ev.target.value, metric: nextMetric, geo: null, parent: null, period: null });
+            setQuery({ disease: ev.target.value, metric: preferredMetric(next), geo: null, parent: null, period: null });
           }}>
-            {diseases.map((item) => (
+            {mapDiseases.map((item) => (
               <option key={item.id} value={item.id}>
                 {item.name_zh || item.name}
               </option>
@@ -356,27 +398,17 @@ export function MapWorkbench() {
           </select>
         </label>
         <label className="text-sm">
-          负担档
+          数据
           <select
             className="field mt-1"
-            value={classMode}
+            value={dataMode}
             onChange={(ev) => {
               lockPeriod.current = undefined;
-              setQuery({ class: ev.target.value });
+              setQuery({ mode: ev.target.value, period: null });
             }}
           >
-            {CLASS_MODES.map((item) => (
-              <option key={item.id} value={item.id}>
-                {item.label}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="text-sm">
-          观测/预测
-          <select className="field mt-1" value={layer} onChange={(ev) => setQuery({ layer: ev.target.value })}>
-            <option value="obs">观测</option>
-            <option value="forecast">预测（另色描边）</option>
+            <option value="real">真实监测</option>
+            <option value="demo">演示（主动打开）</option>
           </select>
         </label>
         <label className="relative min-w-[220px] flex-1 text-sm">
@@ -398,6 +430,11 @@ export function MapWorkbench() {
         <button className="btn" onClick={() => setQuery({ parent: null })}>
           全球
         </button>
+        {obs?.suggested_parent_geo_id && !parent ? (
+          <button className="btn" onClick={() => setQuery({ parent: obs.suggested_parent_geo_id })}>
+            查看有数据的下级地区
+          </button>
+        ) : null}
         <button className="btn" onClick={exportView}>
           导出当前视图
         </button>
@@ -410,14 +447,14 @@ export function MapWorkbench() {
         <aside className={`shrink-0 space-y-3 overflow-auto lg:w-72 ${leftOpen ? "" : "hidden lg:block"}`}>
           <section className="card text-sm">
             <div className="mb-2 flex items-center justify-between">
-              <h2 className="font-medium">筛选与覆盖</h2>
+              <h2 className="font-medium">图例与覆盖</h2>
               <button className="text-xs text-sea lg:hidden" onClick={() => setLeftOpen(false)}>收起</button>
             </div>
-            <p className="text-slate-600">{coverage?.note}</p>
+            <p className="text-slate-600">{obs?.coverage_note || coverage?.note}</p>
             <dl className="mt-3 grid grid-cols-2 gap-2">
-              <div>边界单位 {coverage?.n_boundary_units ?? "—"}</div>
-              <div>有数据 {coverage?.n_with_data ?? "—"}</div>
-              <div>无数据 {coverage?.n_without_data ?? "—"}</div>
+              <div>边界 {coverage?.geo_coverage?.n_boundary_units ?? coverage?.n_boundary_units ?? "—"}</div>
+              <div>有病种数据 {coverage?.disease_coverage?.n_with_data ?? coverage?.n_with_data ?? "—"}</div>
+              <div>无病种数据 {coverage?.disease_coverage?.n_without_data ?? coverage?.n_without_data ?? "—"}</div>
               <div>未匹配 {obs?.unmatched_count ?? coverage?.n_unmatched_records ?? 0}</div>
             </dl>
             <p className="mt-2 text-xs text-slate-500">分级：{obs?.legend?.method}。{obs?.legend?.method_note}</p>
@@ -441,20 +478,26 @@ export function MapWorkbench() {
             ) : null}
           </section>
           <section className="card max-h-72 overflow-auto text-sm">
-            <h2 className="mb-2 font-medium">排序表</h2>
-            <table className="w-full text-left">
-              <thead><tr className="text-xs text-slate-500"><th>地区</th><th>档</th><th>值</th></tr></thead>
-              <tbody>
-                {ranked.slice(0, 20).map((item) => (
-                  <tr key={item.geo_id} className={`cursor-pointer ${item.geo_id === geoId ? "bg-teal-50" : ""}`} onClick={() => selectGeo(item.geo_id)}>
-                    <td className="py-1">{item.name}</td>
-                    <td title={item.trend_label}>{item.label} {trendMark(item.trend_dir)}</td>
-                    <td>{item.value == null ? "—" : Number(item.value).toFixed(2)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-            {!ranked.length ? <EmptyState title="该周期没有可排序的有值地区" detail="无数据不会被当成 0。" /> : null}
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <h2 className="font-medium">地区列表</h2>
+              <button className="text-xs text-sea" onClick={() => setListFilter(listFilter === "value" ? "all" : "value")}>
+                {listFilter === "value" ? "显示全部" : "只看有数值"}
+              </button>
+            </div>
+            <p className="mb-2 text-xs text-slate-500">口径可比 {comparableCount} 个。{obs?.coverage_note}</p>
+            <ul>
+              {regionList.map((item) => (
+                <li key={item.geo_id}>
+                  <button
+                    className={`w-full py-1 text-left ${item.geo_id === geoId ? "bg-teal-50" : ""}`}
+                    onClick={() => selectGeo(item.geo_id)}
+                  >
+                    {item.name}
+                    <span className="ml-2 text-xs text-slate-500">{item.data_status || "无数据"}</span>
+                  </button>
+                </li>
+              ))}
+            </ul>
           </section>
         </aside>
 
@@ -471,22 +514,12 @@ export function MapWorkbench() {
               adminGeo={parent ? adminBounds?.geojson : null}
               features={obs?.features || []}
               selectedId={geoId}
-              isForecast={layer === "forecast"}
-              onHover={setHover}
+              isForecast={false}
               onSelect={selectGeo}
               flyTo={flyTo}
               error={bounds ? "" : error}
             />
           </div>
-          {hover ? (
-            <div className="pointer-events-none absolute right-4 top-4 rounded-lg border border-slate-200 bg-white/95 px-3 py-2 text-sm shadow-card">
-              <div className="font-medium">{hover.name}</div>
-              <div>{hover.label || hover.data_status || "无数据"}</div>
-              <div>{hover.value == null ? "—" : `${hover.value} ${hover.unit || ""}`}</div>
-              {hover.trend_label ? <div className="text-xs">{trendMark(hover.trend_dir)} {hover.trend_label}{hover.prev_label ? `（上周 ${hover.prev_label}）` : ""}</div> : null}
-              {hover.period_end ? <div className="text-xs text-slate-500">{hover.period_end}</div> : null}
-            </div>
-          ) : null}
         </section>
 
         <aside className={`shrink-0 space-y-3 overflow-auto lg:w-[360px] ${rightOpen ? "" : "hidden lg:block"}`}>
@@ -496,23 +529,54 @@ export function MapWorkbench() {
               <button className="text-xs text-sea lg:hidden" onClick={() => setRightOpen(false)}>收起</button>
             </div>
             {!geoId ? (
-              <EmptyState title="点击地图或排序表选择地区" />
+              <EmptyState title="点击地图或地区列表打开趋势、来源、订正与分析" />
             ) : (
               <div className="space-y-2">
                 <div className="text-lg font-display">{detail?.name || geoId}</div>
-                <div>状态：{detail?.current?.data_status || "无数据"}</div>
-                <div>数值：{detail?.current?.count ?? "—"} {detail?.current?.unit || "例"}</div>
-                <div>每10万：{detail?.current?.rate_per_100k ?? detail?.current?.value ?? "—"}</div>
-                {selectedFeature ? (
-                  <>
-                    <div>负担档：{selectedFeature.label || "—"}</div>
-                    <div>档位变化：{trendMark(selectedFeature.trend_dir)} {selectedFeature.trend_label || "—"}</div>
-                  </>
+                <div>状态：{detail?.current?.data_status || obs?.note || "无数据"}</div>
+                {obs?.note ? (
+                  <div className="rounded bg-amber-50 px-2 py-1 text-amber-950">
+                    {obs.note}
+                    {obs.switch_metric ? (
+                      <button className="btn ml-2" onClick={() => setQuery({ metric: obs.switch_metric })}>
+                        切换到 {obs.switch_metric}
+                      </button>
+                    ) : null}
+                    {obs.switch_view ? (
+                      <button className="btn ml-2" onClick={() => setQuery({ view: obs.switch_view })}>
+                        改为报告人数
+                      </button>
+                    ) : null}
+                  </div>
                 ) : null}
+                <div>报告人数：{detail?.current?.count ?? "—"} {detail?.current?.unit || ""}</div>
+                <div>每10万人：{detail?.current?.rate_per_100k ?? "—"}</div>
+                {selectedFeature ? <div>数值区间：{selectedFeature.label || "—"} {trendMark(selectedFeature.trend_dir)}</div> : null}
                 <div>周期：{detail?.current?.period_start || "—"} → {detail?.current?.period_end || "—"}</div>
-                <div>发布：{detail?.current?.issued_at || "—"}</div>
+                <div>采集/发布：{detail?.current?.issued_at || "—"}（无官方发布时间时为采集时点快照）</div>
                 <div>来源：{detail?.current?.source_id || "—"} {detail?.source_url ? <a className="text-sea" href={detail.source_url} target="_blank" rel="noreferrer">链接</a> : null}</div>
-                {detail?.population ? <div>人口分母：{detail.population.population}（{detail.population.year}，{detail.population.source}）</div> : <div>无可靠人口分母</div>}
+                {detail?.current?.source_conflicts?.length ? (
+                  <p className="text-xs text-amber-800">另有来源未合并：{detail.current.source_conflicts.map((item: any) => item.source_id).join("、")}</p>
+                ) : null}
+                {detail?.comparability ? (
+                  <p className="text-xs">{detail.comparability.comparable ? "口径可比" : `不可比：${detail.comparability.reason}`}</p>
+                ) : null}
+                {detail?.revision_contrast ? (
+                  <div className="rounded border border-slate-200 p-2 text-xs">
+                    <div className="font-medium">订正对照</div>
+                    {detail.revision_contrast.comparable ? (
+                      <>
+                        <div>首次 {detail.revision_contrast.first?.value}（{detail.revision_contrast.first?.issued_at}）</div>
+                        <div>修订 {detail.revision_contrast.latest?.value}（{detail.revision_contrast.latest?.issued_at}）</div>
+                        <div>差值 {detail.revision_contrast.delta}</div>
+                        <p>这是同一报告周的数据订正，不是报告趋势变化。</p>
+                      </>
+                    ) : (
+                      <p>{detail.revision_contrast.reason || "没有版本历史，不可比较。"}</p>
+                    )}
+                  </div>
+                ) : null}
+                {detail?.population ? <div>人口分母：{detail.population.population}（{detail.population.year}，{detail.population.source}）</div> : <div>无可靠人口分母，不计算人均率。</div>}
                 {detail?.point_note ? <p className="text-xs text-slate-500">{detail.point_note}</p> : null}
                 {detail?.drilldown_available ? (
                   <button className="btn-primary btn" onClick={() => setQuery({ parent: geoId, geo: null })}>下钻到一级行政区</button>
@@ -544,8 +608,11 @@ export function MapWorkbench() {
             </div>
             {mode === "ai" ? (
               <>
-                <p className="text-xs text-slate-500">{aiStatus?.message || "核查 AI 配置"}。密钥只在后端。</p>
-                <button className="btn-primary btn" disabled={!geoId || Boolean(busy)} onClick={runAi}>生成 AI 草稿</button>
+                <p className="text-xs text-slate-500">{aiStatus?.reason || aiStatus?.message || "核查 AI 配置"}。密钥只在后端。{aiStatus?.live_verified ? " 最近真实调用已记录。" : " 尚未验证。"}</p>
+                {aiStatus?.probe_available ? (
+                  <button className="btn" onClick={() => api.aiProbe().then(setAiStatus).catch((err) => setAiStatus({ configured: false, message: String(err.message || err) }))}>真实连通检查</button>
+                ) : null}
+                <button className="btn-primary btn" disabled={!geoId || Boolean(busy) || !aiStatus?.configured || aiStatus?.state === "test_stub"} onClick={runAi}>生成 AI 草稿</button>
               </>
             ) : (
               <div className="space-y-2">
@@ -633,9 +700,7 @@ export function MapWorkbench() {
           <span className="text-xs text-slate-500">
             {(obs?.periods || []).length < 2
               ? "当前病种没有可播放的多周时序。"
-              : classMode === "absolute"
-                ? `共 ${(obs?.periods || []).length} 周 · 固定档 map_burden_v1，跨周同色同区间`
-                : `共 ${(obs?.periods || []).length} 周 · 锁定分级周：${obs?.classification?.lock_period_end || lockPeriod.current || period}`}
+              : `共 ${(obs?.periods || []).length} 周 · 锁定同一口径色阶：${obs?.classification?.lock_period_end || lockPeriod.current || period}`}
           </span>
         </div>
         <div className="flex flex-wrap items-center gap-3 text-xs">
@@ -654,7 +719,8 @@ export function MapWorkbench() {
         </div>
         <p className="text-xs text-slate-500">
           {obs?.legend?.metric_name} · {obs?.legend?.unit} · 周周期 · 来源 {(obs?.legend?.sources || []).join(", ") || "无"} · 截止 {obs?.as_of || "—"}
-          。地图完整不等于数据完整。五档名称用于读图，不是临床诊断或官方疫情等级。
+          。颜色按可核验指标区间，不是官方严重程度。预测比较请用「预测比较」页。历史病种请用「历史资料」。
+          {obs?.note ? ` ${obs.note}` : ""}
         </p>
       </footer>
     </div>

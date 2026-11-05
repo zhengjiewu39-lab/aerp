@@ -256,7 +256,7 @@ def parse_flusight_csv(
             "metric": "hospital_admissions",
             "value": pd.to_numeric(frame[value_col], errors="coerce"),
             "unit": "count",
-            "source_id": "flusight-nhsn",
+            "source_id": "flusight",
             "quality_flag": "observed",
         }
     )
@@ -310,3 +310,90 @@ def observations_from_flusight(parsed: dict) -> pd.DataFrame:
     if parsed.get("status") != "success":
         return pd.DataFrame()
     return parsed["rows"].copy()
+
+
+def import_flusight_map_observations(db, *, kind: str = "snapshot") -> dict:
+    from aerp.core.hashing import sha256_text
+    from aerp.db.models import DataSource, Disease, ImportBatch, ObservationVintage, Region
+
+    parsed = fetch_flusight_target(kind=kind)
+    frame = parsed.get("rows")
+    if parsed.get("status") != "success" or frame is None or getattr(frame, "empty", True):
+        return {
+            "status": "error",
+            "message": parsed.get("message") or "FluSight 目标文件不可用。",
+            "fetch": {k: v for k, v in parsed.items() if k != "rows"},
+            "is_fixture": False,
+        }
+    if db.get(Disease, "influenza") is None:
+        db.add(Disease(id="influenza", name="流感", description="FluSight / NHSN 住院。", is_synthetic=False))
+        db.flush()
+    if db.get(DataSource, "flusight") is None:
+        db.add(
+            DataSource(
+                id="flusight",
+                name="CDC FluSight target hospital admissions",
+                url=FLUSIGHT_REPO,
+                license=LICENSE_NOTE,
+                update_note=LICENSE_NOTE,
+                connector_status="available",
+            )
+        )
+        db.flush()
+    for region_id in frame["region_id"].astype(str).unique():
+        if db.get(Region, region_id) is None:
+            db.add(Region(id=region_id, name=region_id, note="FluSight location / FIPS", scenario="flusight"))
+    payload_hash = sha256_text(frame.to_json(orient="records", date_format="iso"))
+    batch_id = f"flusight-map-{payload_hash[:12]}"
+    existing = db.get(ImportBatch, batch_id)
+    if existing:
+        return {
+            "status": "exists",
+            "batch_id": batch_id,
+            "n_rows": existing.row_count,
+            "is_fixture": False,
+            "replay_mode": parsed.get("replay_mode"),
+            "provenance": parsed.get("provenance"),
+        }
+    db.add(
+        ImportBatch(
+            id=batch_id,
+            source_id="flusight",
+            file_hash=payload_hash,
+            filename=f"flusight-{kind}.csv",
+            imported_at=utcnow(),
+            row_count=int(len(frame)),
+            note=LICENSE_NOTE,
+            is_synthetic=False,
+        )
+    )
+    db.flush()
+    n = 0
+    for row in frame.itertuples(index=False):
+        db.add(
+            ObservationVintage(
+                disease_id="influenza",
+                region_id=str(row.region_id),
+                period_start=pd.Timestamp(row.period_start).to_pydatetime(),
+                period_end=pd.Timestamp(row.period_end).to_pydatetime(),
+                issued_at=pd.Timestamp(row.issued_at).to_pydatetime(),
+                metric="hospital_admissions",
+                value=None if pd.isna(row.value) else float(row.value),
+                unit="count",
+                source_id="flusight",
+                quality_flag=str(row.quality_flag),
+                import_batch_id=batch_id,
+            )
+        )
+        n += 1
+    db.commit()
+    return {
+        "status": "success",
+        "batch_id": batch_id,
+        "n_rows": n,
+        "n_regions": int(frame["region_id"].nunique()),
+        "is_fixture": False,
+        "replay_mode": parsed.get("replay_mode"),
+        "vintage_kind": "Hub snapshot" if kind == "snapshot" else "Hub as_of vintage",
+        "provenance": parsed.get("provenance"),
+    }

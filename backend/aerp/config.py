@@ -13,6 +13,7 @@ class Settings(BaseSettings):
 
     aerp_database_url: str = f"sqlite:///{ROOT / 'data' / 'aerp.db'}"
     aerp_auto_seed: bool = True
+    aerp_seed_map_demo: bool = False
     aerp_demo_seed: int = 42
     aerp_host: str = "127.0.0.1"
     aerp_port: int = 8000
@@ -26,6 +27,8 @@ class Settings(BaseSettings):
     aerp_ai_timeout_seconds: int = 60
     aerp_ai_max_retries: int = 2
     aerp_ai_allow_mock: bool = False
+    aerp_who_cache_hours: int = 24
+    aerp_source_cache_hours: int = 24
 
     @property
     def cors_origins(self) -> list[str]:

@@ -401,6 +401,21 @@ def _try_who_cache(db: Session) -> None:
         return
 
 
+def _try_flunet_cache(db: Session) -> None:
+    from aerp.config import ROOT
+    from aerp.services.who_flunet import SOURCE_ID, fetch_and_import
+
+    if db.scalar(select(ImportBatch.id).where(ImportBatch.source_id == SOURCE_ID)):
+        return
+    cache = ROOT / "data" / "raw" / "who_flunet.csv"
+    if not cache.exists():
+        return
+    try:
+        fetch_and_import(db)
+    except Exception:
+        return
+
+
 def ensure_seeded(db: Session) -> None:
     settings = get_settings()
     ensure_disease_registry(db)
@@ -414,15 +429,20 @@ def ensure_seeded(db: Session) -> None:
         if db.get(Region, "R5") is None:
             seed_synthetic(db, seed=settings.aerp_demo_seed, force=True, replace=True)
             seed_measles(db, force=False)
-            seed_map_demo(db)
+            if settings.aerp_seed_map_demo:
+                seed_map_demo(db)
             return
         refresh_region_context(db)
         seed_measles(db, force=False)
         db.commit()
         _try_who_cache(db)
-        seed_map_demo(db)
+        _try_flunet_cache(db)
+        if settings.aerp_seed_map_demo:
+            seed_map_demo(db)
         return
     seed_synthetic(db, seed=settings.aerp_demo_seed)
     seed_measles(db, force=False)
     _try_who_cache(db)
-    seed_map_demo(db)
+    _try_flunet_cache(db)
+    if settings.aerp_seed_map_demo:
+        seed_map_demo(db)

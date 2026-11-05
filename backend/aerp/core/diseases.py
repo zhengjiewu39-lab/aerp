@@ -17,6 +17,7 @@ TRANSMISSION_OTHER = "other_extension"
 
 TARGET_WEEKLY_CASES = "weekly_cases"
 TARGET_WEEKLY_ADMISSIONS = "hospital_admissions"
+TARGET_LAB_DETECTIONS = "lab_detections"
 TARGET_POSITIVITY = "positivity"
 TARGET_THRESHOLD_RISK = "threshold_risk"
 
@@ -63,11 +64,17 @@ DISEASE_SPECS: dict[str, DiseaseSpec] = {
         name_en="Influenza",
         pathogen_class="orthomyxovirus",
         transmission=TRANSMISSION_RESPIRATORY,
-        targets=(TARGET_WEEKLY_ADMISSIONS, TARGET_THRESHOLD_RISK),
+        targets=(TARGET_LAB_DETECTIONS, TARGET_WEEKLY_ADMISSIONS, TARGET_THRESHOLD_RISK),
         time_grain="week",
-        regions_note="FluSight 地点码（US 与州 FIPS）。覆盖取决于 NHSN 与 Hub 文件。",
-        time_range_note="以已缓存 FluSight vintage/snapshot 实际覆盖为准，不假设全季完整。",
+        regions_note="全球国家层用 WHO FluNet 实验室周检出；美国州级住院仍用 FluSight/NHSN，两类指标不得混用。",
+        time_range_note="FluNet 以实际导入周为准。美国住院覆盖以 FluSight/NHSN 为准。",
         sources=(
+            {
+                "id": "who_flunet",
+                "name": "WHO FluNet / GISRS",
+                "url": "https://www.who.int/tools/flunet/",
+                "field": "INF_ALL weekly laboratory detections",
+            },
             {
                 "id": "flusight",
                 "name": "CDC FluSight Forecast Hub",
@@ -81,8 +88,8 @@ DISEASE_SPECS: dict[str, DiseaseSpec] = {
                 "field": "confirmed_admissions_flu_ew",
             },
         ),
-        license_note="FluSight 与 NHSN/Delphi 条款保持原样。本项目不改许可证。",
-        surveillance_definition="周确诊流感住院人数。病例、阳性率不得并入同一目标。",
+        license_note="WHO FluNet 需署名。FluSight 与 NHSN/Delphi 条款保持原样。",
+        surveillance_definition="国家层为周实验室流感检出（INF_ALL）。美国州层为周确诊流感住院。二者不是同一指标。",
         surveillance_changes="NHSN 覆盖与 FluSight as_of 语义在 2025-07-05 前后不同。",
         auxiliaries=("population",),
         models=("persistence", "damped_trend", "retrain_glm", "hierarchical", "equal_weight", "adaptive"),
@@ -91,7 +98,7 @@ DISEASE_SPECS: dict[str, DiseaseSpec] = {
         status_label="真实接入，已有回放验证",
         trainable=True,
         is_synthetic=False,
-        notes="保留并验证已有 FluSight/NHSN 流感住院流程。",
+        notes="世界地图默认 FluNet 检出。美国住院不下钻不会外推到其他国家。",
     ),
     "covid19": DiseaseSpec(
         disease_id="covid19",
@@ -136,11 +143,17 @@ DISEASE_SPECS: dict[str, DiseaseSpec] = {
         name_en="RSV",
         pathogen_class="pneumovirus",
         transmission=TRANSMISSION_RESPIRATORY,
-        targets=(TARGET_WEEKLY_ADMISSIONS, TARGET_THRESHOLD_RISK),
+        targets=(TARGET_LAB_DETECTIONS, TARGET_WEEKLY_ADMISSIONS, TARGET_THRESHOLD_RISK),
         time_grain="week",
-        regions_note="Delphi NHSN 州码。",
-        time_range_note="覆盖以探测结果为准。",
+        regions_note="全球国家层用 WHO FluNet RSV 检出；美国州级住院仍用 NHSN。",
+        time_range_note="FluNet 以实际导入周为准。NHSN 住院只覆盖美国。",
         sources=(
+            {
+                "id": "who_flunet",
+                "name": "WHO FluNet / GISRS",
+                "url": "https://www.who.int/tools/flunet/",
+                "field": "RSV weekly laboratory detections",
+            },
             {
                 "id": "delphi_nhsn_rsv",
                 "name": "Delphi Epidata NHSN RSV admissions",
@@ -148,8 +161,8 @@ DISEASE_SPECS: dict[str, DiseaseSpec] = {
                 "field": "confirmed_admissions_rsv_ew",
             },
         ),
-        license_note="Delphi 与 CDC NHSN 条款。",
-        surveillance_definition="周确诊 RSV 住院人数。",
+        license_note="WHO FluNet 需署名。Delphi 与 CDC NHSN 条款保持原样。",
+        surveillance_definition="国家层为周 RSV 实验室检出。美国州层为周确诊 RSV 住院。二者不是同一指标。",
         surveillance_changes="儿科与成人覆盖可能不同，本版不拆年龄组。",
         auxiliaries=("population",),
         models=("persistence", "damped_trend", "retrain_glm", "equal_weight"),
@@ -158,7 +171,7 @@ DISEASE_SPECS: dict[str, DiseaseSpec] = {
         status_label="真实数据可预测（以连接器实际覆盖为准）",
         trainable=True,
         is_synthetic=False,
-        notes="独立信号，不是流感连接器改名。",
+        notes="独立 RSV 信号。世界地图默认 FluNet 检出，不用美国住院填别国。",
     ),
     "dengue": DiseaseSpec(
         disease_id="dengue",

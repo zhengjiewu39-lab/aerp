@@ -61,6 +61,13 @@ CONNECTORS = [
         "note": "国家级报告新增病例/死亡，不是住院或感染人数。拉取失败时国家层保持无数据，不填演示数字。",
     },
     {
+        "id": "who_flunet",
+        "name": "WHO FluNet / GISRS 国家周实验室监测",
+        "status": "unverified",
+        "url": "https://www.who.int/tools/flunet/",
+        "note": "流感 INF_ALL 与 RSV 检出。不是住院。失败时国家层保持无数据，不用美国住院填补。",
+    },
+    {
         "id": "dengue_paho",
         "name": "登革热来源核查（PAHO/WHO）",
         "status": "unverified",
@@ -88,6 +95,10 @@ def list_connectors() -> list[dict]:
             from aerp.services.who_covid import connector_status as who_status
 
             row.update({k: v for k, v in who_status().items() if k in {"status", "note", "url"}})
+        if row["id"] == "who_flunet":
+            from aerp.services.who_flunet import connector_status as flunet_status
+
+            row.update({k: v for k, v in flunet_status().items() if k in {"status", "note", "url"}})
         if row["id"] == "dengue_paho":
             from aerp.services.dengue import adapter_status
 

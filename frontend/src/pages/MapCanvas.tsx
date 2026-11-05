@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import maplibregl, { type Map as MapLibreMap, type MapGeoJSONFeature } from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 
@@ -14,7 +14,7 @@ type Props = {
   features: any[];
   selectedId?: string;
   isForecast?: boolean;
-  onHover: (feature: any | null, lngLat?: { lng: number; lat: number }) => void;
+  onHover?: (feature: any | null, lngLat?: { lng: number; lat: number }) => void;
   onSelect: (geoId: string) => void;
   flyTo?: { geoId: string; geometry?: any } | null;
   error?: string;
@@ -29,6 +29,23 @@ function colorMap(features: any[]) {
     };
   }
   return map;
+}
+
+function extendBounds(collection: GeoJSON.FeatureCollection | null | undefined) {
+  const bounds = new maplibregl.LngLatBounds();
+  for (const feat of collection?.features || []) {
+    const geom = feat.geometry as any;
+    if (!geom) continue;
+    if (geom.type === "Point") {
+      bounds.extend(geom.coordinates);
+      continue;
+    }
+    const coords = geom.type === "Polygon" ? geom.coordinates.flat() : geom.coordinates.flat(2);
+    for (const pair of coords) {
+      if (Array.isArray(pair) && pair.length >= 2) bounds.extend([pair[0], pair[1]]);
+    }
+  }
+  return bounds;
 }
 
 function withFills(
@@ -72,6 +89,9 @@ export function MapCanvas({
 }: Props) {
   const root = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
+  const hadAdmin = useRef(false);
+  const featureMap = useRef<Record<string, any>>({});
+  const [hover, setHover] = useState<any | null>(null);
 
   useEffect(() => {
     if (!root.current || mapRef.current) return;
@@ -188,12 +208,24 @@ export function MapCanvas({
           (map.getSource("admin") as maplibregl.GeoJSONSource).setData(admin);
         }
         map.setLayoutProperty("country-fill", "visibility", "none");
+        if (map.getLayer("admin-fill")) map.setLayoutProperty("admin-fill", "visibility", "visible");
+        if (map.getLayer("admin-line")) map.setLayoutProperty("admin-line", "visibility", "visible");
+        if (!hadAdmin.current) {
+          const bounds = extendBounds(admin);
+          if (!bounds.isEmpty()) map.fitBounds(bounds, { padding: 40, maxZoom: 4, duration: 700 });
+        }
+        hadAdmin.current = true;
       } else if (map.getLayer("country-fill")) {
         map.setLayoutProperty("country-fill", "visibility", "visible");
         if (map.getLayer("admin-fill")) {
           map.setLayoutProperty("admin-fill", "visibility", "none");
           map.setLayoutProperty("admin-line", "visibility", "none");
         }
+        if (hadAdmin.current) {
+          const bounds = extendBounds(countries);
+          if (!bounds.isEmpty()) map.fitBounds(bounds, { padding: 20, maxZoom: 2, duration: 700 });
+        }
+        hadAdmin.current = false;
       }
       if (isForecast && map.getLayer("country-line")) {
         map.setPaintProperty("country-line", "line-color", FORECAST);
@@ -208,6 +240,10 @@ export function MapCanvas({
   }, [countryGeo, pointsGeo, adminGeo, features, selectedId, isForecast]);
 
   useEffect(() => {
+    featureMap.current = Object.fromEntries((features || []).map((item: any) => [item.geo_id, item]));
+  }, [features]);
+
+  useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
     const onMove = (ev: maplibregl.MapMouseEvent) => {
@@ -216,13 +252,16 @@ export function MapCanvas({
       })[0] as MapGeoJSONFeature | undefined;
       if (!hit) {
         map.getCanvas().style.cursor = "";
-        onHover(null);
+        setHover(null);
+        onHover?.(null);
         return;
       }
       map.getCanvas().style.cursor = "pointer";
       const geoId = String(hit.id || hit.properties?.geo_id || "");
-      const row = (features || []).find((item) => item.geo_id === geoId) || hit.properties;
-      onHover({ ...row, geo_id: geoId, name: hit.properties?.name }, ev.lngLat);
+      const row = featureMap.current[geoId] || hit.properties;
+      const payload = { ...row, geo_id: geoId, name: row?.name || hit.properties?.name };
+      setHover(payload);
+      onHover?.(payload, ev.lngLat);
     };
     const onClick = (ev: maplibregl.MapMouseEvent) => {
       const hit = map.queryRenderedFeatures(ev.point, {
@@ -237,7 +276,7 @@ export function MapCanvas({
       map.off("mousemove", onMove);
       map.off("click", onClick);
     };
-  }, [features, onHover, onSelect]);
+  }, [onHover, onSelect]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -261,6 +300,14 @@ export function MapCanvas({
       {error ? (
         <div className="absolute left-3 top-3 max-w-sm rounded-lg border border-amber-200 bg-white/95 p-3 text-sm text-amber-950">
           底图样式仅使用本地边界。{error}
+        </div>
+      ) : null}
+      {hover ? (
+        <div className="pointer-events-none absolute right-3 top-3 max-w-xs rounded-lg border border-slate-200 bg-white/95 px-3 py-2 text-sm shadow-card">
+          <div className="font-medium">{hover.name}</div>
+          <div>{hover.label || hover.data_status || "无数据"}</div>
+          <div>{hover.value == null ? "—" : `${hover.value} ${hover.unit || ""}`}</div>
+          {hover.period_end ? <div className="text-xs text-slate-500">{hover.period_end}{hover.lag_days != null ? ` · 滞后 ${hover.lag_days} 天` : ""}</div> : null}
         </div>
       ) : null}
       <div className="pointer-events-none absolute bottom-3 left-3 rounded bg-white/90 px-2 py-1 text-[11px] text-slate-600">

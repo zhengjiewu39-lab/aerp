@@ -22,7 +22,7 @@ _ISO3_INDEX: dict[str, str] | None = None
 
 def ensure_geo_catalog(db: Session) -> dict:
     global _READY
-    if _READY and db.get(GeoUnit, "iso3166-1:US") is not None:
+    if _READY and db.get(GeoUnit, "iso3166-1:US") is not None and db.get(GeoUnit, "iso3166-1:GU") is not None:
         return {"n_units": None, "cached": True, "boundary_version": BOUNDARY_VERSION}
     units = unit_records()
     by_id = {}
@@ -154,24 +154,32 @@ def _ensure_code_mappings(db: Session, by_id: dict[str, dict]) -> None:
             if iso2:
                 _add_mapping(db, source_id="iso3166-1", source_region_id=iso2, geo_id=geo_id, method="iso2")
                 _add_mapping(db, source_id="who_covid19", source_region_id=iso2, geo_id=geo_id, method="iso2")
+                _add_mapping(db, source_id="who_flunet", source_region_id=iso2, geo_id=geo_id, method="iso2")
                 _add_mapping(db, source_id="internal", source_region_id=geo_id, geo_id=geo_id, method="geo_id")
             if iso3:
                 _add_mapping(db, source_id="iso3166-1", source_region_id=iso3, geo_id=geo_id, method="iso3")
                 _add_mapping(db, source_id="who_covid19", source_region_id=iso3, geo_id=geo_id, method="iso3")
+                _add_mapping(db, source_id="who_flunet", source_region_id=iso3, geo_id=geo_id, method="iso3")
         fips = spec.get("fips")
         if fips and spec.get("level") == "adm1":
             postal = FIPS_TO_POSTAL.get(fips)
             _add_mapping(db, source_id="fips", source_region_id=fips, geo_id=geo_id, method="fips")
             _add_mapping(db, source_id="flusight", source_region_id=fips, geo_id=geo_id, method="fips")
+            _add_mapping(db, source_id="flusight-nhsn", source_region_id=fips, geo_id=geo_id, method="fips")
             _add_mapping(db, source_id="delphi_nhsn", source_region_id=fips, geo_id=geo_id, method="fips")
             if postal:
                 _add_mapping(db, source_id="usps", source_region_id=postal, geo_id=geo_id, method="usps")
                 _add_mapping(db, source_id="delphi_nhsn", source_region_id=postal.lower(), geo_id=geo_id, method="usps_lower")
                 _add_mapping(db, source_id="flusight", source_region_id=f"US-{postal}", geo_id=geo_id, method="iso3166-2")
+                _add_mapping(db, source_id="flusight-nhsn", source_region_id=postal, geo_id=geo_id, method="usps")
+                for nhsn_source in ("nhsn_influenza", "nhsn_covid19", "nhsn_rsv"):
+                    _add_mapping(db, source_id=nhsn_source, source_region_id=postal.lower(), geo_id=geo_id, method="usps_lower")
+                    _add_mapping(db, source_id=nhsn_source, source_region_id=fips, geo_id=geo_id, method="fips")
     us_id = "iso3166-1:US"
     if us_id in by_id:
         for code in ("US", "USA", "us"):
             _add_mapping(db, source_id="flusight", source_region_id=code, geo_id=us_id, method="iso2" if code.upper() == "US" else "iso3")
+            _add_mapping(db, source_id="flusight-nhsn", source_region_id=code, geo_id=us_id, method="iso2" if code.upper() == "US" else "iso3")
             _add_mapping(db, source_id="delphi_nhsn", source_region_id=code, geo_id=us_id, method="national_code")
 
 
@@ -189,12 +197,19 @@ def resolve_geo_id(
     *,
     source_id: str | None = None,
     mapping_index: dict[tuple[str, str], str] | None = None,
+    units_index: dict | None = None,
 ) -> tuple[str | None, str]:
     """Return (geo_id, method). Name fuzzy matches are never returned as official."""
     key = str(source_region_id).strip()
     if not key:
         return None, "empty"
-    if db.get(GeoUnit, key):
+
+    def has_unit(geo_id: str) -> bool:
+        if units_index is not None:
+            return geo_id in units_index
+        return db.get(GeoUnit, geo_id) is not None
+
+    if has_unit(key):
         return key, "geo_id"
     mappings = mapping_index if mapping_index is not None else reviewed_mapping_index(db)
     if source_id and (source_id, key) in mappings:
@@ -202,25 +217,26 @@ def resolve_geo_id(
     if source_id and (source_id, key.upper()) in mappings:
         return mappings[(source_id, key.upper())], "source_code"
     country_id = f"iso3166-1:{key.upper()}"
-    if len(key) == 2 and db.get(GeoUnit, country_id):
+    if len(key) == 2 and has_unit(country_id):
         return country_id, "iso2"
     upper = key.upper()
     if len(upper) == 2:
         geo_id = f"iso3166-1:{upper}"
-        if db.get(GeoUnit, geo_id):
+        if has_unit(geo_id):
             return geo_id, "iso2"
-    unit = _unit_by_iso3(db, upper) if len(upper) == 3 and upper.isalpha() else None
-    if unit:
-        return unit.geo_id, "iso3"
+    if len(upper) == 3 and upper.isalpha():
+        geo_id = _iso3_index(db).get(upper)
+        if geo_id:
+            return geo_id, "iso3"
     if upper in POSTAL_TO_FIPS:
         fips = POSTAL_TO_FIPS[upper]
         geo_id = f"iso3166-2:US-{fips}"
-        if db.get(GeoUnit, geo_id):
+        if has_unit(geo_id):
             return geo_id, "usps"
     if upper.isdigit():
         fips = upper.zfill(2) if len(upper) <= 2 else upper[:2]
         geo_id = f"iso3166-2:US-{fips}"
-        if db.get(GeoUnit, geo_id):
+        if has_unit(geo_id):
             return geo_id, "fips"
     return None, "unmatched"
 

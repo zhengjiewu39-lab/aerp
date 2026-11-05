@@ -122,7 +122,10 @@ export const api = {
     return request<any>(`/api/map/regions/${encodeURIComponent(geoId)}/analyses?${q}`);
   },
   importWhoCovid: (live = false) => request<any>(`/api/map/who-covid/import?live=${live ? "true" : "false"}`, { method: "POST" }),
+  importNhsn: (live = false, diseaseId = "influenza") =>
+    request<any>(`/api/map/nhsn/import?live=${live ? "true" : "false"}&disease_id=${encodeURIComponent(diseaseId)}`, { method: "POST" }),
   aiStatus: () => request<any>("/api/ai/status"),
+  aiProbe: () => request<any>("/api/ai/probe", { method: "POST" }),
   createAiAnalysis: (body: Record<string, unknown>) =>
     request<any>("/api/analyses/ai", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }),
   createManualAnalysis: (body: Record<string, unknown>) =>

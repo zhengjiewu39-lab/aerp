@@ -16,8 +16,9 @@ CANDIDATE_SOURCES = (
         "id": "paho_plisa",
         "name": "PAHO PLISA dengue indicators",
         "url": "https://www3.paho.org/data/index.php/en/mnu-topics/indicadores-dengue-en.html",
-        "license": "PAHO 条款，导入前需核对再分发条件。",
+        "license": "PAHO 条款，导入前需核对再分发条件。HTML 门户不是可再分发的周病例 vintage。",
         "expected_fields": ["country", "week", "probable_cases", "confirmed_cases"],
+        "time_grain": "unknown_until_csv",
     },
     {
         "id": "who_dengue",
@@ -25,6 +26,15 @@ CANDIDATE_SOURCES = (
         "url": "https://www.who.int/health-topics/dengue-and-severe-dengue",
         "license": "WHO 公开页面，通常不是完整 vintage 时序。",
         "expected_fields": ["event narrative"],
+        "time_grain": "event",
+    },
+    {
+        "id": "opendengue",
+        "name": "OpenDengue compiled case data",
+        "url": "https://opendengue.org/",
+        "license": "需核对其数据使用条款。已知主表多为月或年，不能直接当作本图所需的周监测。",
+        "expected_fields": ["adm_0_name", "calendar_end_date", "dengue_total"],
+        "time_grain": "mostly_monthly",
     },
 )
 RAW_DIR = ROOT / "data" / "raw" / "dengue"
@@ -66,7 +76,7 @@ def check_dengue_sources(*, live: bool = False) -> dict:
         "status": "pending",
         "trainable": False,
         "replay_mode_allowed": None,
-        "message": "登革热适配接口已就绪。尚未确认可再分发的周病例修订版本，因此不接入真实训练，也不伪造病例。",
+        "message": "登革热仍不启用：候选来源不是已核清许可的周病例修订序列。页面可访问不等于可以上地图。",
         "sources": probes,
         "checked_at": utcnow().isoformat(sep=" ", timespec="seconds"),
         "note": "有可靠数据后再做真实接入。无历史版本时最多做最终数据时间切分。",

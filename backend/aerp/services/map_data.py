@@ -16,26 +16,30 @@ from aerp.core.timeutil import as_timestamp, isoformat, utcnow
 from aerp.core.vintages import latest_visible
 from aerp.db.models import Forecast, GeoUnit, MapClassification, PopulationEstimate
 from aerp.services.geo_catalog import name_candidates, resolve_geo_id, reviewed_mapping_index
+from aerp.core.geo import WHO_NONGEO_CODES
 from aerp.core.map_demo import SOURCE_ID as MAP_DEMO_SOURCE
 from aerp.services.observations import observations_frame
 
-# Sequential heatmap (yellow → orange → red). Not an official clinical severity scale.
+# Sequential heatmap (yellow → orange → red). Numeric bins only; not official severity.
 RELATIVE_COLORS = ["#fff3b0", "#ffcc4d", "#fb8c00", "#e53935", "#b71c1c", "#7f0000"]
 MISSING_COLOR = "#c5cbd3"
+UNREPORTED_COLOR = "#d9dee6"
+NO_DENOM_COLOR = "#c4b39a"
 ZERO_COLOR = "#f7f8fa"
 STALE_OUTLINE = "#b45309"
 FORECAST_OUTLINE = "#6d28d9"
 COUNT_WARNING = "绝对人数受人口规模影响，不能直接当作负担或严重程度。"
-BURDEN_LABELS = ["轻微", "一般", "较重", "严重", "非常严重"]
-RELATIVE_NOTE = "五档名称用于读热力图，表示本图内相对负担，不是临床诊断，也不是卫生部门的官方疫情等级。"
-ABSOLUTE_NOTE = "每10万展示档 map_burden_v1，跨周同一颜色表示同一数值区间。这是本系统的研究展示档，不是 WHO 或各国官方等级。"
-ABSOLUTE_RATE_BREAKS = [0.0, 1.0, 5.0, 15.0, 40.0, 1_000_000.0]
-TREND_LABELS = {"up": "档位上升", "down": "档位下降", "stable": "档位未变", "unknown": "无法比较"}
+CLASS_NOTE = "颜色按本图选定指标的数值区间划分，不是临床诊断，也不是卫生部门官方疫情等级。"
+PREFERRED_SOURCES = ("who_flunet", "who_covid19", "flusight", "flusight-nhsn", "nhsn_influenza", "nhsn_covid19", "nhsn_rsv")
+US_TERRITORY_COUNTRY_IDS = ("iso3166-1:AS", "iso3166-1:GU", "iso3166-1:MP", "iso3166-1:VI")
+TREND_LABELS = {"up": "数值区间上移", "down": "数值区间下移", "stable": "数值区间未变", "unknown": "无法比较"}
+POP_YEAR_SLACK = 2
 
 METRIC_LABELS = {
     "weekly_cases": {"name": "周新增报告病例", "unit": "例", "kind": "count"},
     "weekly_deaths": {"name": "周报告死亡数", "unit": "例", "kind": "count"},
     "hospital_admissions": {"name": "周新增住院", "unit": "例", "kind": "count"},
+    "lab_detections": {"name": "周实验室检出", "unit": "例", "kind": "count"},
     "rate_per_100k": {"name": "每10万人周报告数", "unit": " /10万", "kind": "rate"},
     "wow_change": {"name": "相对上一可比周变化", "unit": "%", "kind": "trend"},
 }
@@ -69,13 +73,55 @@ def _finite(value) -> float | None:
     return number
 
 
-def population_for(db: Session, geo_id: str) -> dict[str, Any] | None:
-    row = db.scalars(
+def _population_index(db: Session) -> dict[str, PopulationEstimate]:
+    index: dict[str, PopulationEstimate] = {}
+    for row in db.scalars(select(PopulationEstimate).order_by(PopulationEstimate.year.desc())).all():
+        index.setdefault(row.geo_id, row)
+    return index
+
+
+def population_for(
+    db: Session,
+    geo_id: str,
+    period_end: str | datetime | None = None,
+    cache: dict[str, PopulationEstimate] | None = None,
+) -> dict[str, Any] | None:
+    row = cache.get(geo_id) if cache is not None else db.scalars(
         select(PopulationEstimate).where(PopulationEstimate.geo_id == geo_id).order_by(PopulationEstimate.year.desc())
     ).first()
     if row is None:
         return None
-    return {"geo_id": geo_id, "year": row.year, "population": row.population, "source": row.source, "version": row.version}
+    payload = {"geo_id": geo_id, "year": row.year, "population": row.population, "source": row.source, "version": row.version}
+    if period_end is not None:
+        year = as_timestamp(period_end).year
+        if abs(int(row.year) - int(year)) > POP_YEAR_SLACK:
+            payload["incompatible"] = True
+            payload["reason"] = f"人口年份 {row.year} 与报告年 {year} 相差超过 {POP_YEAR_SLACK} 年，不计算人均率。"
+            return payload
+    return payload
+
+
+def _pick_default_period(visible, *, demo: bool) -> str | None:
+    """Skip trailing stub weeks. Do not invent values for silent countries."""
+    if visible is None or getattr(visible, "empty", True):
+        return None
+    work = visible.copy()
+    work["_end"] = pd.to_datetime(work["period_end"]).dt.normalize()
+    work["_value"] = pd.to_numeric(work["value"], errors="coerce")
+    flagged = work.loc[work["_value"].notna() & ~work["quality_flag"].isin(["unreported", "missing"])]
+    if flagged.empty:
+        flagged = work
+    n_rep = flagged.drop_duplicates(["_end", "region_id"]).groupby("_end")["region_id"].nunique()
+    if n_rep.empty:
+        return isoformat(work["_end"].max())
+    if demo:
+        totals = flagged.groupby("_end")["_value"].sum()
+        return isoformat(totals.idxmax())
+    peak = int(n_rep.max())
+    floor = max(4, int(0.2 * peak)) if peak else 4
+    usable = n_rep[n_rep >= floor]
+    pick = usable.index.max() if not usable.empty else n_rep.index.max()
+    return isoformat(pick)
 
 
 def _map_source_region(
@@ -85,8 +131,11 @@ def _map_source_region(
     mapping_index: dict | None = None,
     *,
     include_candidates: bool = False,
+    units_index: dict | None = None,
 ) -> dict[str, Any]:
-    geo_id, method = resolve_geo_id(db, region_id, source_id=source_id, mapping_index=mapping_index)
+    geo_id, method = resolve_geo_id(
+        db, region_id, source_id=source_id, mapping_index=mapping_index, units_index=units_index
+    )
     if geo_id:
         return {"source_region_id": region_id, "geo_id": geo_id, "match_method": method, "review_status": "reviewed"}
     payload = {
@@ -94,6 +143,7 @@ def _map_source_region(
         "geo_id": None,
         "match_method": "unmatched",
         "review_status": "unmatched",
+        "reason": WHO_NONGEO_CODES.get(str(region_id).upper()),
     }
     if include_candidates:
         payload["candidates"] = name_candidates(db, region_id)
@@ -139,41 +189,23 @@ def _latest_per_region(frame: pd.DataFrame, cutoff) -> pd.DataFrame:
     visible = latest_visible(frame, cutoff)
     if visible.empty:
         return visible
-    visible = visible.sort_values("period_end")
-    return visible.groupby("region_id", as_index=False, dropna=False).tail(1)
+    valued = visible.loc[visible["value"].notna() & ~visible["quality_flag"].isin(["unreported", "missing"])]
+    use = valued if not valued.empty else visible
+    use = use.sort_values("period_end")
+    return use.groupby("region_id", as_index=False, dropna=False).tail(1)
 
 
-def _burden_labels(n: int) -> list[str]:
-    if n >= 5:
-        return list(BURDEN_LABELS)
-    if n <= 0:
-        return []
-    if n == 1:
-        return ["一般"]
-    if n == 2:
-        return ["轻微", "非常严重"]
-    if n == 3:
-        return ["轻微", "一般", "非常严重"]
-    return ["轻微", "一般", "严重", "非常严重"]
+def _range_labels(breaks: list[float], unit: str) -> list[str]:
+    labels = []
+    for i in range(max(0, len(breaks) - 1)):
+        lo, hi = breaks[i], breaks[i + 1]
+        labels.append(f"{lo:.3g}–{hi:.3g}{unit}".strip())
+    return labels or ["无正值"]
 
 
-def build_absolute_rate_classification() -> dict[str, Any]:
-    return {
-        "method": "absolute_rate_research",
-        "breaks": list(ABSOLUTE_RATE_BREAKS),
-        "labels": list(BURDEN_LABELS),
-        "colors": RELATIVE_COLORS[:5],
-        "is_official_severity": False,
-        "note": ABSOLUTE_NOTE,
-        "version": "map_burden_v1",
-        "fixed": True,
-    }
-
-
-def build_classification(values: list[float], *, method: str = "quantile_relative") -> dict[str, Any]:
-    if method == "absolute_rate_research":
-        return build_absolute_rate_classification()
+def build_classification(values: list[float], *, method: str = "quantile_relative", unit: str = "") -> dict[str, Any]:
     finite = sorted(v for v in values if v is not None and v > 0)
+    suffix = unit or ""
     if method != "quantile_relative" or len(finite) < 4:
         if not finite:
             breaks = [0.0]
@@ -184,14 +216,14 @@ def build_classification(values: list[float], *, method: str = "quantile_relativ
             else:
                 step = (hi - lo) / 5
                 breaks = [0.0] + [lo + step * i for i in range(1, 6)]
-        labels = _burden_labels(max(1, len(breaks) - 1))
+        labels = _range_labels(breaks, suffix)
         return {
-            "method": "equal_interval_relative" if finite else "empty",
+            "method": "equal_interval" if finite else "empty",
             "breaks": breaks,
             "labels": labels,
             "colors": RELATIVE_COLORS[: len(labels)],
             "is_official_severity": False,
-            "note": RELATIVE_NOTE if finite else "本周没有正值，无法分组。",
+            "note": CLASS_NOTE if finite else "本周没有正值，无法按数值区间着色。",
         }
     quantiles = [0.2, 0.4, 0.6, 0.8, 1.0]
     series = pd.Series(finite)
@@ -199,19 +231,24 @@ def build_classification(values: list[float], *, method: str = "quantile_relativ
     cleaned = [breaks[0]]
     for item in breaks[1:]:
         cleaned.append(max(item, cleaned[-1] + 1e-9))
+    labels = _range_labels(cleaned, suffix)
     return {
-        "method": "quantile_relative",
+        "method": "quantile_locked",
         "breaks": cleaned,
-        "labels": list(BURDEN_LABELS),
+        "labels": labels,
         "colors": RELATIVE_COLORS[:5],
         "is_official_severity": False,
-        "note": RELATIVE_NOTE,
+        "note": CLASS_NOTE,
     }
 
 
 def _bin_value(value: float | None, classification: dict[str, Any], data_status: str) -> dict[str, Any]:
-    if data_status in {"no_data", "unreported"}:
-        return {"bin": None, "color": MISSING_COLOR, "label": "无数据" if data_status == "no_data" else "未报告"}
+    if data_status == "no_data":
+        return {"bin": None, "color": MISSING_COLOR, "label": "无数据"}
+    if data_status == "unreported":
+        return {"bin": None, "color": UNREPORTED_COLOR, "label": "未报告"}
+    if data_status in {"no_denominator", "zero_denominator"}:
+        return {"bin": None, "color": NO_DENOM_COLOR, "label": "有报告人数但无适配人口分母"}
     if data_status == "zero" or (value is not None and value == 0):
         return {"bin": 0, "color": ZERO_COLOR, "label": "报告为零"}
     breaks = classification.get("breaks") or []
@@ -264,14 +301,15 @@ def _layer_value(row_value: float | None, population: dict | None, prev: float |
     count = _finite(row_value)
     rate = None
     rate_status = None
-    if population and population.get("population"):
-        pop = int(population["population"])
+    usable_pop = population if population and not population.get("incompatible") else None
+    if usable_pop and usable_pop.get("population"):
+        pop = int(usable_pop["population"])
         if pop > 0 and count is not None:
             rate = count / pop * 100_000
         elif pop <= 0:
             rate_status = "zero_denominator"
     else:
-        rate_status = "no_denominator"
+        rate_status = "no_denominator" if not usable_pop else (usable_pop.get("reason") and "incompatible_denominator") or "no_denominator"
     change = None
     change_status = None
     if prev is None:
@@ -291,28 +329,23 @@ def _layer_value(row_value: float | None, population: dict | None, prev: float |
     return {"value": count, "unit": "例", "display_metric": "count", "rate_status": rate_status, "change": change, "change_status": change_status, "count": count}
 
 
-def _select_map_frame(db: Session, frame, *, parent_geo_id: str | None) -> tuple[Any, bool]:
-    """Prefer real country-mapped series on the world layer; otherwise use labeled map demo."""
+def _select_map_frame(db: Session, frame, *, parent_geo_id: str | None, data_mode: str = "real") -> tuple[Any, bool]:
+    """Real mode never falls back to demo. Demo only when data_mode=demo."""
     if frame is None or getattr(frame, "empty", True):
         return frame, False
     demo_mask = frame["source_id"].astype(str) == MAP_DEMO_SOURCE
     real = frame.loc[~demo_mask].copy()
     demo = frame.loc[demo_mask].copy()
-    if parent_geo_id:
-        return real, False
-    if real.empty:
+    if str(data_mode) == "demo":
         return demo, not demo.empty
-    mapping_index = reviewed_mapping_index(db)
-    country_ids: set[str] = set()
-    for item in real[["region_id", "source_id"]].drop_duplicates().itertuples(index=False):
-        geo_id, _method = resolve_geo_id(db, str(item.region_id), source_id=str(item.source_id), mapping_index=mapping_index)
-        if geo_id and str(geo_id).startswith("iso3166-1:"):
-            country_ids.add(str(geo_id))
-            if len(country_ids) >= 8:
-                return real, False
-    if not demo.empty:
-        return demo, True
     return real, False
+
+
+def _source_rank(source_id: str) -> int:
+    try:
+        return PREFERRED_SOURCES.index(str(source_id))
+    except ValueError:
+        return len(PREFERRED_SOURCES) + 1
 
 
 def map_observations(
@@ -322,49 +355,24 @@ def map_observations(
     metric: str,
     period_end: str | None,
     time_mode: str = "unified",
-    view: str = "rate_per_100k",
+    view: str = "count",
     data_mode: str = "real",
     parent_geo_id: str | None = None,
     cutoff: datetime | None = None,
     replay_cutoff: datetime | None = None,
     lock_period_end: str | None = None,
     class_mode: str = "quantile",
+    source_id: str | None = None,
 ) -> dict[str, Any]:
     spec = get_disease(disease_id)
     cutoff_ts = replay_cutoff or utcnow()
     requested_metric = metric
     raw_frame = observations_frame(db, disease_id=disease_id, metric=metric)
-    if (raw_frame is None or raw_frame.empty) and metric != "weekly_cases":
-        alt = observations_frame(db, disease_id=disease_id, metric="weekly_cases")
-        if alt is not None and not alt.empty:
-            metric = "weekly_cases"
-            raw_frame = alt
-    frame, using_demo = _select_map_frame(db, raw_frame, parent_geo_id=parent_geo_id)
-    demo = bool(spec and spec.is_synthetic) or data_mode == "demo" or using_demo
+    frame, using_demo = _select_map_frame(db, raw_frame, parent_geo_id=parent_geo_id, data_mode=data_mode)
+    demo = data_mode == "demo" or using_demo
     periods = map_periods(db, disease_id, metric, frame)
     visible_all = latest_visible(frame, cutoff_ts) if not frame.empty else frame
-    last_reported_period = None
-    if visible_all is not None and not visible_all.empty:
-        flagged = visible_all.loc[visible_all["value"].notna() & ~visible_all["quality_flag"].isin(["unreported", "missing"])]
-        if not flagged.empty:
-            work = flagged.copy()
-            work["_end"] = pd.to_datetime(work["period_end"]).dt.normalize()
-            work["_value"] = pd.to_numeric(work["value"], errors="coerce")
-            positive = work.loc[work["_value"] > 0]
-            if not positive.empty:
-                grouped = positive.groupby("_end")
-                n_pos = grouped.size()
-                usable = n_pos[n_pos >= 4]
-                if using_demo:
-                    totals = grouped["_value"].sum()
-                    pick_index = usable.index if not usable.empty else n_pos.index
-                    last_reported_period = isoformat(totals.loc[pick_index].idxmax())
-                else:
-                    last_reported_period = isoformat(usable.index.max() if not usable.empty else n_pos.index.max())
-            else:
-                counts = work.groupby("_end").size()
-                usable = counts[counts >= 8]
-                last_reported_period = isoformat(usable.index.max() if not usable.empty else work["_end"].max())
+    last_reported_period = _pick_default_period(visible_all, demo=using_demo)
     requested_period_end = period_end
     period_clamped = False
     if not period_end:
@@ -416,7 +424,23 @@ def map_observations(
             "classification": build_classification([]),
             "legend": _legend(metric, view, build_classification([]), sources=[], period_end=period_end, is_forecast=False),
             "coverage": coverage_report(db, disease_id=disease_id, metric=metric, parent_geo_id=parent_geo_id),
-            "note": "选定病种/指标在该周期没有观测。全球底图仍显示，无数据不等于 0。",
+            "metric_unchanged": requested_metric == metric,
+            "switch_metric": None if requested_metric != "hospital_admissions" else ("weekly_cases" if disease_id == "covid19" else None),
+            "suggested_metric": (
+                "lab_detections"
+                if parent_geo_id is None and metric == "hospital_admissions" and spec is not None and "lab_detections" in spec.targets
+                else (spec.default_target if spec is not None and metric not in spec.targets else None)
+            ),
+            "suggested_parent_geo_id": "iso3166-1:US" if requested_metric == "hospital_admissions" and parent_geo_id is None else None,
+            "note": (
+                "该指标只有美国州级住院，世界图层不会外推着色。"
+                if requested_metric == "hospital_admissions" and parent_geo_id is None
+                else (
+                    "该地区暂无住院数据"
+                    if requested_metric == "hospital_admissions"
+                    else "选定病种/指标在该周期没有观测。全球底图仍显示，无数据不等于 0。"
+                )
+            ),
         }
 
     if time_mode == "latest":
@@ -426,43 +450,61 @@ def map_observations(
         week = _week_snapshot(frame, period_end, cutoff_ts)
         unified_end = as_timestamp(period_end)
 
-    # previous comparable week for trend
-    prev_end = unified_end - pd.Timedelta(days=7)
-    prev_week = _week_snapshot(frame, prev_end, cutoff_ts)
-    prev_by_region = {}
-    if not prev_week.empty:
-        for item in prev_week.itertuples(index=False):
-            prev_by_region[str(item.region_id)] = _finite(item.value)
-
     unmatched = []
     by_geo: dict[str, dict[str, Any]] = {}
     sources = set()
     values_for_class = []
     mapping_index = reviewed_mapping_index(db)
+    geo_index = {row.geo_id: row for row in db.scalars(select(GeoUnit)).all()}
+    pop_cache = _population_index(db)
+    prev_lookup_cache: dict[str, dict[tuple[str, str], float | None]] = {}
+    candidates: dict[str, list[dict[str, Any]]] = {}
+    skipped_parents: set[str] = set()
     for item in week.itertuples(index=False):
-        mapped = _map_source_region(db, str(item.region_id), str(item.source_id), mapping_index)
+        mapped = _map_source_region(
+            db, str(item.region_id), str(item.source_id), mapping_index, units_index=geo_index
+        )
         if not mapped["geo_id"]:
-            unmatched.append({**mapped, "period_end": isoformat(item.period_end), "value": _finite(item.value), "metric": metric})
+            unmatched.append({**mapped, "period_end": isoformat(item.period_end), "value": _finite(item.value), "metric": metric, "source_id": str(item.source_id)})
             continue
         geo_id = mapped["geo_id"]
-        unit = db.get(GeoUnit, geo_id)
+        unit = geo_index.get(geo_id)
         if parent_geo_id and unit and unit.parent_geo_id != parent_geo_id and geo_id != parent_geo_id:
-            continue
+            if not (parent_geo_id == "iso3166-1:US" and geo_id in US_TERRITORY_COUNTRY_IDS):
+                continue
         if parent_geo_id is None and unit and unit.level != "country":
-            # do not paint states onto the world layer, and do not roll them up
+            if unit.parent_geo_id:
+                skipped_parents.add(unit.parent_geo_id)
             continue
-        pop = population_for(db, geo_id)
+        if source_id and str(item.source_id) != str(source_id):
+            candidates.setdefault(geo_id, []).append({"source_id": str(item.source_id), "value": _finite(item.value), "issued_at": isoformat(item.issued_at)})
+            continue
+        pop = population_for(db, geo_id, item.period_end, cache=pop_cache)
         lag_days = None
+        displayed_end = item.period_end if time_mode == "latest" else unified_end
         if time_mode == "latest":
             lag_days = int((unified_end - as_timestamp(item.period_end)).days)
+        prev_target = as_timestamp(displayed_end) - pd.Timedelta(days=7)
+        cache_key = str(prev_target.normalize())
+        if cache_key not in prev_lookup_cache:
+            prev_week = _week_snapshot(frame, prev_target, cutoff_ts)
+            lookup: dict[tuple[str, str], float | None] = {}
+            if prev_week is not None and not prev_week.empty:
+                for prev_item in prev_week.itertuples(index=False):
+                    lookup[(str(prev_item.source_id), str(prev_item.region_id))] = _finite(prev_item.value)
+            prev_lookup_cache[cache_key] = lookup
+        prev_val = prev_lookup_cache[cache_key].get((str(item.source_id), str(item.region_id)))
         data_status = _status_for_value(_finite(item.value), quality=item.quality_flag, lag_days=lag_days)
-        layer = _layer_value(_finite(item.value), pop, prev_by_region.get(str(item.region_id)), view)
+        layer = _layer_value(_finite(item.value), pop, prev_val, view)
         display_value = layer["value"]
         if view == "wow_change" and layer.get("change_status") == "undefined_growth":
             data_status = "undefined_growth"
             display_value = None
         if view == "rate_per_100k" and display_value is None and layer.get("count") is not None:
             data_status = layer.get("rate_status") or "no_denominator"
+        rate_value = None
+        if not layer.get("rate_status") and pop and not pop.get("incompatible") and layer.get("count") is not None:
+            rate_value = layer["value"] if view == "rate_per_100k" else (layer["count"] / pop["population"] * 100000 if pop.get("population") else None)
         row = {
             "geo_id": geo_id,
             "name": unit.name if unit else geo_id,
@@ -471,7 +513,7 @@ def map_observations(
             "match_method": mapped["match_method"],
             "value": display_value,
             "count": layer.get("count"),
-            "rate_per_100k": None if layer.get("rate_status") else (layer["value"] if view == "rate_per_100k" else (layer["count"] / pop["population"] * 100000 if pop and layer.get("count") is not None else None)),
+            "rate_per_100k": rate_value,
             "change": layer.get("change"),
             "change_status": layer.get("change_status"),
             "unit": layer.get("unit"),
@@ -479,28 +521,50 @@ def map_observations(
             "period_start": isoformat(item.period_start),
             "period_end": isoformat(item.period_end),
             "issued_at": isoformat(item.issued_at),
-            "source_id": item.source_id,
+            "source_id": str(item.source_id),
             "quality_flag": item.quality_flag,
             "data_status": data_status,
             "lag_days": lag_days,
             "population": pop,
             "is_forecast": False,
-            "prev_value": _layer_value(prev_by_region.get(str(item.region_id)), pop, None, view).get("value") if prev_by_region.get(str(item.region_id)) is not None else None,
+            "prev_value": _layer_value(prev_val, pop, None, view).get("value") if prev_val is not None else None,
+            "_rank": _source_rank(str(item.source_id)),
         }
-        # same geo+period multiple revisions already collapsed by latest_visible
-        by_geo[geo_id] = row
-        sources.add(item.source_id)
-        if view == "rate_per_100k" and isinstance(row["value"], float):
-            values_for_class.append(row["value"])
-        elif view != "rate_per_100k" and isinstance(row.get("count"), float):
-            values_for_class.append(row["count"] if view != "wow_change" else (row["change"] if row["change"] is not None else None))
+        bucket = candidates.setdefault(geo_id, [])
+        bucket.append(row)
+
+    for geo_id, rows in candidates.items():
+        display_rows = [item for item in rows if "geo_id" in item and "count" in item]
+        if not display_rows:
+            continue
+        display_rows.sort(key=lambda item: (item.get("_rank", 99), str(item.get("issued_at") or "")))
+        chosen = display_rows[0]
+        extras = display_rows[1:]
+        if extras:
+            chosen["source_conflicts"] = [
+                {"source_id": item.get("source_id"), "value": item.get("count"), "issued_at": item.get("issued_at"), "period_end": item.get("period_end")}
+                for item in extras
+            ]
+            chosen["comparability"] = {
+                "comparable": False,
+                "reason": "同一地理单元存在多个不可比来源，未平均、未覆盖。地图显示优先来源，其余列入冲突。",
+            }
+        else:
+            chosen["comparability"] = {"comparable": True, "reason": None}
+        chosen.pop("_rank", None)
+        by_geo[geo_id] = chosen
+        sources.add(chosen["source_id"])
+        if view == "rate_per_100k" and isinstance(chosen["value"], float):
+            values_for_class.append(chosen["value"])
+        elif view != "rate_per_100k" and isinstance(chosen.get("count"), float):
+            values_for_class.append(chosen["count"] if view != "wow_change" else (chosen["change"] if chosen["change"] is not None else None))
 
     values_for_class = [v for v in values_for_class if v is not None]
     stored = db.scalars(
         select(MapClassification).where(MapClassification.disease_id == disease_id, MapClassification.metric == f"{metric}:{view}")
     ).first()
-    want_absolute = class_mode == "absolute" and view == "rate_per_100k"
-    if stored and stored.method != "quantile_dynamic" and stored.is_official_severity:
+    unit_suffix = METRIC_LABELS.get(view, METRIC_LABELS.get(metric, {})).get("unit", "")
+    if stored and stored.is_official_severity:
         classification = {
             "id": stored.id,
             "method": stored.method,
@@ -511,11 +575,6 @@ def map_observations(
             "note": stored.note or "本图使用已审核的官方分级。",
             "fixed": True,
         }
-    elif want_absolute:
-        classification = build_absolute_rate_classification()
-        classification["class_mode"] = "absolute"
-        if view != "rate_per_100k":
-            classification["mode_fallback"] = "绝对档只用于每10万人"
     else:
         lock_values = values_for_class
         if lock_period_end and str(lock_period_end) != str(period_end):
@@ -525,23 +584,23 @@ def map_observations(
                 mapped = _map_source_region(db, str(item.region_id), str(item.source_id), mapping_index)
                 if not mapped["geo_id"]:
                     continue
-                pop = population_for(db, mapped["geo_id"])
+                pop = population_for(db, mapped["geo_id"], item.period_end)
                 layer = _layer_value(_finite(item.value), pop, None, view)
                 if layer.get("value") is not None:
                     lock_values.append(layer["value"])
-        classification = build_classification(lock_values)
+        classification = build_classification(lock_values, unit=unit_suffix)
         classification["fixed"] = True
-        classification["class_mode"] = "quantile"
         classification["lock_period_end"] = lock_period_end or period_end
-        classification["playback_note"] = "相对档在播放时锁定起始周阈值，避免同一颜色在不同周代表不同数值。"
-        if class_mode == "absolute" and view != "rate_per_100k":
-            classification["mode_fallback"] = "绝对档只用于每10万人，当前图层改用相对档。"
+        classification["playback_note"] = "播放时锁定同一指标口径的数值区间，避免同色在不同周代表不同数值。"
 
     wanted_level = "adm1" if parent_geo_id else "country"
     units_q = select(GeoUnit).where(GeoUnit.level == wanted_level)
     units = list(db.scalars(units_q).all())
     if parent_geo_id:
         units = [row for row in units if row.parent_geo_id == parent_geo_id]
+        if parent_geo_id == "iso3166-1:US":
+            extra = [geo_index[gid] for gid in US_TERRITORY_COUNTRY_IDS if gid in geo_index]
+            units.extend(extra)
         if not units:
             return {
                 "disease_id": disease_id,
@@ -574,9 +633,16 @@ def map_observations(
         if row["data_status"] == "undefined_growth":
             bucket = {"bin": None, "color": "#fde68a", "label": "前期为 0，增长率无定义"}
         if row["data_status"] in {"no_denominator", "zero_denominator"} and view == "rate_per_100k":
-            bucket = {"bin": None, "color": MISSING_COLOR, "label": "无可靠人口分母"}
+            bucket = {"bin": None, "color": NO_DENOM_COLOR, "label": "有报告人数但无适配人口分母"}
             row["value"] = None
-        features.append({**row, **bucket, "representative_point": unit.representative_point})
+        comparable = (row.get("comparability") or {}).get("comparable", True) and row.get("data_status") not in {
+            "stale",
+            "partial",
+            "no_denominator",
+            "zero_denominator",
+            "undefined_growth",
+        }
+        features.append({**row, **bucket, "representative_point": unit.representative_point, "rank_eligible": comparable})
 
     for feat in features:
         prev_value = feat.get("prev_value")
@@ -647,6 +713,37 @@ def map_observations(
         "as_of": isoformat(cutoff_ts),
         "parent_geo_id": parent_geo_id,
         "last_reported_period": last_reported_period,
+        "n_with_value": sum(1 for item in features if item.get("data_status") in {"reported", "zero", "stale", "partial"}),
+        "coverage_note": (
+            f"本视图 {sum(1 for item in features if item.get('data_status') in {'reported', 'zero', 'stale', 'partial'})}/{len(features)} "
+            "个地区有可核验数值。未报告保持灰色，不是系统漏数。"
+        ),
+        "rate_unavailable": view == "rate_per_100k" and not any(item.get("rate_per_100k") is not None for item in features),
+        "switch_view": "count" if view == "rate_per_100k" and not any(item.get("rate_per_100k") is not None for item in features) else None,
+        "suggested_metric": (
+            "lab_detections"
+            if parent_geo_id is None and metric == "hospital_admissions" and spec is not None and "lab_detections" in spec.targets
+            else None
+        ),
+        "suggested_parent_geo_id": next(iter(skipped_parents))
+        if parent_geo_id is None
+        and metric == "hospital_admissions"
+        and len(skipped_parents) == 1
+        and sum(1 for item in features if item.get("count") is not None) <= 1
+        else None,
+        "note": (
+            "人口年份与报告年不匹配，未计算每10万人率。地图按报告人数才有可核验着色。"
+            if view == "rate_per_100k" and not any(item.get("rate_per_100k") is not None for item in features)
+            else (
+                "住院只有美国州级监测，不会涂到其他国家。全球请用周实验室检出（WHO FluNet）。"
+                if parent_geo_id is None and metric == "hospital_admissions"
+                else (
+                    "该指标只有下级行政区数据，世界图层不会外推着色。"
+                    if parent_geo_id is None and len(skipped_parents) == 1 and not any(item.get("count") is not None for item in features)
+                    else None
+                )
+            )
+        ),
     }
 
 
@@ -670,8 +767,9 @@ def _legend(metric: str, view: str, classification: dict[str, Any], *, sources: 
         "bins": bins,
         "states": [
             {"id": "no_data", "label": "无数据", "color": MISSING_COLOR},
-            {"id": "unreported", "label": "未报告", "color": MISSING_COLOR, "outline": "dotted"},
+            {"id": "unreported", "label": "未报告", "color": UNREPORTED_COLOR, "outline": "dotted"},
             {"id": "zero", "label": "报告为零", "color": ZERO_COLOR},
+            {"id": "no_denominator", "label": "有人数、无适配人口分母", "color": NO_DENOM_COLOR},
             {"id": "stale", "label": "过期或质量不足", "color": None, "outline": STALE_OUTLINE},
             {"id": "forecast", "label": "预测（不是观测）", "color": None, "outline": FORECAST_OUTLINE, "active": is_forecast},
         ],
@@ -706,6 +804,8 @@ def coverage_report(
                 if key in seen:
                     continue
                 seen.add(key)
+                if str(item.source_id) == MAP_DEMO_SOURCE:
+                    continue
                 mapped = _map_source_region(db, key, str(item.source_id), mapping_index)
                 if mapped["geo_id"]:
                     mapped_geos.add(mapped["geo_id"])
@@ -723,7 +823,9 @@ def coverage_report(
         "unmatched_preview": unmatched_rows[:20],
         "with_data": with_data[:80],
         "without_data_preview": without[:40],
-        "note": "全球边界完整不代表疾病数据完整。无数据保持灰色，不会填补国家数字。美国州级数据只在下钻层着色。",
+        "geo_coverage": {"n_boundary_units": len(units), "boundary_version": "ne_110m_admin0-2024 + us-states-fips + small-points"},
+        "disease_coverage": {"n_with_data": len(with_data), "n_without_data": len(without), "n_unmatched_records": len(unmatched_rows)},
+        "note": "地理覆盖与疾病数据覆盖分开统计。全球边界完整不代表疾病数据完整。无数据保持灰色。美国州级数据只在下钻层着色，不会外推到其他国家。",
         "drilldown": {
             "iso3166-1:US": "有 Natural Earth/TIGER 州界。仅当该病种存在州级观测时着色，不把美国总值复制到各州。",
         },
@@ -738,7 +840,7 @@ def region_detail(
     metric: str,
     period_end: str | None,
     time_mode: str = "unified",
-    view: str = "rate_per_100k",
+    view: str = "count",
 ) -> dict[str, Any]:
     unit = db.get(GeoUnit, geo_id)
     if unit is None:
@@ -751,10 +853,13 @@ def region_detail(
         time_mode=time_mode,
         view=view,
         parent_geo_id=unit.parent_geo_id if unit.level == "adm1" else None,
+        data_mode="real",
     )
     match = next((item for item in payload.get("features") or [] if item["geo_id"] == geo_id), None)
     frame = observations_frame(db, disease_id=disease_id, metric=metric)
-    frame, _using_demo = _select_map_frame(db, frame, parent_geo_id=unit.parent_geo_id if unit.level == "adm1" else None)
+    frame, _using_demo = _select_map_frame(
+        db, frame, parent_geo_id=unit.parent_geo_id if unit.level == "adm1" else None, data_mode="real"
+    )
     series = []
     if not frame.empty:
         visible = latest_visible(frame, utcnow())
@@ -811,8 +916,73 @@ def region_detail(
         "drilldown_message": None if children else "没有可靠下级边界与数据，不把本区数值复制到下级。",
         "snapshot_id": payload.get("snapshot_id"),
         "snapshot_hash": payload.get("snapshot_hash"),
-        "source_url": "https://covid19.who.int/" if (match or {}).get("source_id") == "who_covid19" else None,
+        "source_url": (
+            "https://www.who.int/tools/flunet/"
+            if (match or {}).get("source_id") == "who_flunet"
+            else ("https://covid19.who.int/" if (match or {}).get("source_id") == "who_covid19" else None)
+        ),
         "definition": (get_disease(disease_id).surveillance_definition if get_disease(disease_id) else ""),
+        "revision_contrast": revision_contrast(db, geo_id=geo_id, disease_id=disease_id, metric=metric, period_end=period_end, source_id=(match or {}).get("source_id")),
+        "comparability": (match or {}).get("comparability") or comparability_check(match, metric=metric, view=view),
+    }
+
+
+def comparability_check(row: dict | None, *, metric: str, view: str) -> dict[str, Any]:
+    if not row:
+        return {"comparable": False, "reason": "无观测，不能参与排名。"}
+    reasons = []
+    if row.get("source_conflicts"):
+        reasons.append("存在多个来源")
+    if view == "rate_per_100k" and row.get("rate_per_100k") is None:
+        reasons.append("缺少适配年份的人口分母")
+    if row.get("data_status") in {"stale", "partial"}:
+        reasons.append(f"报告状态为 {row.get('data_status')}")
+    if row.get("quality_flag") in {"partial", "delayed"}:
+        reasons.append("部分报告或迟报")
+    if reasons:
+        return {"comparable": False, "reason": "；".join(reasons)}
+    return {"comparable": True, "reason": None, "basis": f"同周、同指标 {metric}、同源 {row.get('source_id')}"}
+
+
+def revision_contrast(db: Session, *, geo_id: str, disease_id: str, metric: str, period_end: str | None, source_id: str | None) -> dict[str, Any]:
+    if not period_end:
+        return {"comparable": False, "reason": "未指定报告周。"}
+    frame = observations_frame(db, disease_id=disease_id, metric=metric)
+    if frame.empty:
+        return {"comparable": False, "reason": "没有版本历史。"}
+    mapping_index = reviewed_mapping_index(db)
+    target = as_timestamp(period_end).normalize()
+    work = frame.loc[pd.to_datetime(frame["period_end"]).dt.normalize() == target].copy()
+    if source_id:
+        work = work.loc[work["source_id"].astype(str) == str(source_id)]
+    rows = []
+    for item in work.itertuples(index=False):
+        mapped = _map_source_region(db, str(item.region_id), str(item.source_id), mapping_index)
+        if mapped.get("geo_id") != geo_id:
+            continue
+        if str(item.source_id) == MAP_DEMO_SOURCE:
+            continue
+        rows.append(item)
+    if len(rows) < 2:
+        return {
+            "comparable": False,
+            "label": "不可比较",
+            "reason": "没有可追溯的多次采集/发布版本，不能称为数据订正。",
+        }
+    rows.sort(key=lambda item: as_timestamp(item.issued_at))
+    first, last = rows[0], rows[-1]
+    first_val, last_val = _finite(first.value), _finite(last.value)
+    delta = None if first_val is None or last_val is None else last_val - first_val
+    return {
+        "comparable": True,
+        "kind": "data_revision",
+        "note": "同一报告周、同一来源的首次采集快照与后续修订快照。报告周之间的差异不是数据订正。",
+        "source_id": str(last.source_id),
+        "period_end": isoformat(last.period_end),
+        "first": {"value": first_val, "issued_at": isoformat(first.issued_at), "quality_flag": first.quality_flag},
+        "latest": {"value": last_val, "issued_at": isoformat(last.issued_at), "quality_flag": last.quality_flag},
+        "delta": delta,
+        "crossed_bin": None,
     }
 
 

@@ -8,9 +8,13 @@ from urllib.request import Request, urlopen
 
 import pandas as pd
 
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session
+
 from aerp.config import ROOT
-from aerp.core.hashing import canonical_hash, sha256_bytes
+from aerp.core.hashing import canonical_hash, sha256_bytes, sha256_text
 from aerp.core.timeutil import utcnow
+from aerp.db.models import DataSource, Disease, ImportBatch, ObservationVintage, Region
 
 EPIDATA_BASE = "https://api.delphi.cmu.edu/epidata"
 NHSN_DOCS = "https://cmu-delphi.github.io/delphi-epidata/api/v5-signals/nhsn.html"
@@ -333,11 +337,16 @@ def observations_from_delphi(parsed: dict) -> pd.DataFrame:
     return parsed["rows"].copy()
 
 
+def nhsn_time_window(start: str = "202240") -> str:
+    iso = utcnow().isocalendar()
+    return f"{start}-{iso.year}{iso.week:02d}"
+
+
 def fetch_nhsn_weekly(
     disease_id: str,
     *,
     geo_value: str = "pa",
-    time_values: str = "202240-202520",
+    time_values: str | None = None,
     cache_dir: Path | None = None,
     payload: bytes | None = None,
 ) -> dict:
@@ -345,6 +354,7 @@ def fetch_nhsn_weekly(
     spec = SIGNAL_BY_DISEASE.get(disease_id)
     if spec is None:
         return {"status": "error", "message": f"没有 {disease_id} 的 NHSN 周住院信号配置。", "rows": pd.DataFrame()}
+    time_values = time_values or nhsn_time_window()
     cache_dir = cache_dir or RAW_DIR
     cache_dir.mkdir(parents=True, exist_ok=True)
     params = {
@@ -392,6 +402,130 @@ def fetch_nhsn_weekly(
         "fetch_notes": errors,
     }
     return parsed
+
+
+def import_nhsn_observations(db: Session, *, disease_id: str = "influenza", geo_value: str = "*", time_values: str | None = None) -> dict:
+    fetched = fetch_nhsn_weekly(disease_id, geo_value=geo_value, time_values=time_values)
+    frame = fetched.get("rows")
+    if fetched.get("status") != "success" or frame is None or getattr(frame, "empty", True):
+        return {
+            "status": "error",
+            "message": fetched.get("message") or "NHSN 周住院拉取失败或无行。夹具通过不能代替真实验收。",
+            "fetch": {k: v for k, v in fetched.items() if k != "rows"},
+            "is_fixture": False,
+        }
+    source_id = f"nhsn_{disease_id}"
+    max_end = db.scalar(
+        select(func.max(ObservationVintage.period_end)).where(
+            ObservationVintage.disease_id == disease_id,
+            ObservationVintage.source_id == source_id,
+        )
+    )
+    if max_end is not None:
+        frame = frame.loc[pd.to_datetime(frame["period_end"]) > pd.Timestamp(max_end)].copy()
+        if frame.empty:
+            return {
+                "status": "up_to_date",
+                "message": "已有 NHSN 周住院，没有比本地更新的周期。",
+                "max_period_end": str(pd.Timestamp(max_end).date()),
+                "is_fixture": False,
+                "provenance": fetched.get("provenance"),
+            }
+    if db.get(Disease, disease_id) is None:
+        db.add(Disease(id=disease_id, name=disease_id, description="NHSN 住院信号独立病种。", is_synthetic=False))
+        db.flush()
+    source = db.get(DataSource, source_id)
+    if source is None:
+        db.add(
+            DataSource(
+                id=source_id,
+                name=f"Delphi NHSN {disease_id} weekly admissions",
+                url=NHSN_DOCS,
+                license=LICENSE_NOTE,
+                update_note="采集时点快照。无 issue 列时不能称为官方历史版本。",
+                connector_status="available",
+            )
+        )
+        db.flush()
+    for region_id in frame["region_id"].astype(str).unique():
+        if db.get(Region, region_id) is None:
+            db.add(Region(id=region_id, name=region_id.upper(), note="USPS state / Delphi geo_value", scenario="nhsn"))
+    payload_hash = sha256_text(frame.to_json(orient="records", date_format="iso"))
+    batch_id = f"nhsn-{disease_id}-{payload_hash[:12]}"
+    existing = db.get(ImportBatch, batch_id)
+    if existing:
+        return {
+            "status": "exists",
+            "batch_id": batch_id,
+            "n_rows": existing.row_count,
+            "is_fixture": False,
+            "vintage_kind": "采集时点快照",
+            "provenance": fetched.get("provenance"),
+        }
+    db.add(
+        ImportBatch(
+            id=batch_id,
+            source_id=source_id,
+            file_hash=payload_hash,
+            filename=f"nhsn-{disease_id}.json",
+            imported_at=utcnow(),
+            row_count=int(len(frame)),
+            note=LICENSE_NOTE,
+            is_synthetic=False,
+        )
+    )
+    db.flush()
+    existing_keys = {
+        (str(row.region_id), pd.Timestamp(row.period_start), pd.Timestamp(row.issued_at))
+        for row in db.execute(
+            select(ObservationVintage.region_id, ObservationVintage.period_start, ObservationVintage.issued_at).where(
+                ObservationVintage.disease_id == disease_id,
+                ObservationVintage.source_id == source_id,
+            )
+        )
+    }
+    n = 0
+    for row in frame.itertuples(index=False):
+        key = (str(row.region_id), pd.Timestamp(row.period_start), pd.Timestamp(row.issued_at))
+        if key in existing_keys:
+            continue
+        db.add(
+            ObservationVintage(
+                disease_id=str(row.disease_id),
+                region_id=str(row.region_id),
+                period_start=pd.Timestamp(row.period_start).to_pydatetime(),
+                period_end=pd.Timestamp(row.period_end).to_pydatetime(),
+                issued_at=pd.Timestamp(row.issued_at).to_pydatetime(),
+                metric=str(row.metric),
+                value=None if pd.isna(row.value) else float(row.value),
+                unit=str(row.unit),
+                source_id=source_id,
+                quality_flag=str(row.quality_flag),
+                import_batch_id=batch_id,
+            )
+        )
+        existing_keys.add(key)
+        n += 1
+    if n == 0:
+        db.rollback()
+        return {
+            "status": "up_to_date",
+            "message": "拉取到的 NHSN 行与本地主键重复，没有写入新周。",
+            "is_fixture": False,
+            "provenance": fetched.get("provenance"),
+        }
+    db.commit()
+    return {
+        "status": "success",
+        "batch_id": batch_id,
+        "n_rows": n,
+        "n_regions": int(frame["region_id"].nunique()),
+        "is_fixture": False,
+        "is_synthetic": False,
+        "vintage_kind": "采集时点快照",
+        "provenance": fetched.get("provenance"),
+        "metrics": sorted(set(frame["metric"].astype(str))),
+    }
 
 
 def verified_diseases(last: dict | None = None) -> list[str]:

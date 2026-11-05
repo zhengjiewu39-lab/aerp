@@ -57,14 +57,41 @@ def _operator(x_aerp_operator: str | None) -> str:
 
 
 @router.get("/ai/status")
-def ai_status():
-    return provider_status()
+def ai_status(db: Session = Depends(get_db)):
+    return provider_status(db)
+
+
+@router.post("/ai/probe")
+def ai_probe(db: Session = Depends(get_db)):
+    status = provider_status(db)
+    if not status.get("configured") or status.get("provider") in {"mock", "test"}:
+        return {**status, "ok": False, "message": status.get("reason") or "尚未验证。手动分析仍可使用。"}
+    from aerp.services.ai_provider import complete
+    from aerp.db.models import AiCallLog
+    from aerp.core.timeutil import utcnow
+
+    result = complete({"probe": True, "evidence": [{"id": "e1", "kind": "probe", "note": "连通检查，不含监测数字。"}]})
+    db.add(
+        AiCallLog(
+            created_at=utcnow(),
+            provider=str(result.get("provider") or ""),
+            model=str(result.get("model") or ""),
+            ok=bool(result.get("ok")),
+            live_verified=bool(result.get("ok") and result.get("live_verified")),
+            request_id=result.get("request_id"),
+            latency_ms=result.get("latency_ms"),
+            error=result.get("error"),
+            note="probe",
+        )
+    )
+    db.commit()
+    return {**provider_status(db), "probe": {"ok": result.get("ok"), "error": result.get("error"), "message": result.get("message")}}
 
 
 @router.post("/analyses/ai")
 def analyses_ai(body: AiRequest, db: Session = Depends(get_db), x_aerp_operator: str | None = Header(default=None)):
     ensure_geo_catalog(db)
-    status = provider_status()
+    status = provider_status(db)
     if not status.get("configured"):
         raise HTTPException(503, {"message": "AI未配置/调用失败", "ai": status})
     return create_ai_analysis(

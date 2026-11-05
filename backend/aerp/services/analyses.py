@@ -6,13 +6,13 @@ import re
 import uuid
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from aerp.config import get_settings
 from aerp.core.hashing import canonical_hash
 from aerp.core.timeutil import utcnow
-from aerp.db.models import AnalysisRecord, AnalysisRevision, EvidenceSnapshot, ReviewDecision
+from aerp.db.models import AiCallLog, AnalysisRecord, AnalysisRevision, EvidenceSnapshot, ReviewDecision
 from aerp.services import ai_provider
 from aerp.services.map_data import region_detail
 
@@ -76,7 +76,7 @@ def build_evidence_pack(
         "observation",
         {
             "value": current.get("count"),
-            "rate_per_100k": current.get("rate_per_100k") or current.get("value"),
+            "rate_per_100k": current.get("rate_per_100k") if current.get("rate_per_100k") is not None else None,
             "unit": current.get("unit"),
             "data_status": current.get("data_status"),
             "period_start": current.get("period_start"),
@@ -205,6 +205,26 @@ def validate_structured(structured: dict[str, Any], pack: dict[str, Any]) -> dic
     missing_ref = [item for item in important if isinstance(item, dict) and not item.get("evidence_ids")]
     if missing_ref:
         errors.append("重要结论缺少 evidence_ids")
+    evidence_by_id = {str(item.get("id")): item for item in pack.get("evidence") or [] if item.get("id")}
+    misplaced = []
+    for block_name in ("observations", "possible_explanations", "uncertainties", "data_quality_issues", "suggested_checks"):
+        for item in structured.get(block_name) or []:
+            if not isinstance(item, dict):
+                continue
+            cited_ids = [str(eid) for eid in (item.get("evidence_ids") or [])]
+            allowed_here = set()
+            for eid in cited_ids:
+                if eid in evidence_by_id:
+                    allowed_here |= _allowed_numbers({"evidence": [evidence_by_id[eid]]})
+            for number in re.findall(r"-?\d+\.?\d*", str(item.get("text") or "")):
+                if number in {"0", "1", "2", "10", "100", "100000"}:
+                    continue
+                if not cited_ids:
+                    continue
+                if number not in allowed_here and f"{float(number):.4g}" not in allowed_here and f"{float(number):.2f}" not in allowed_here:
+                    misplaced.append({"number": number, "evidence_ids": cited_ids, "text": str(item.get("text"))[:80]})
+    if misplaced:
+        errors.append(f"量化主张与所引用证据字段不一致: {misplaced[:8]}")
     allowed = _allowed_numbers(pack)
     text_blobs = [str(structured.get("summary") or "")]
     for block_name in REQUIRED_FIELDS:
@@ -220,7 +240,7 @@ def validate_structured(structured: dict[str, Any], pack: dict[str, Any]) -> dic
     invented = sorted(set(invented))
     if invented:
         errors.append(f"出现证据包中不存在的数值，需修正: {invented[:12]}")
-    return {"ok": not errors, "errors": errors, "confirmable": not errors, "invented_numbers": invented}
+    return {"ok": not errors, "errors": errors, "confirmable": not errors, "invented_numbers": invented, "misplaced_numbers": misplaced}
 
 
 def json_text(value: Any) -> str:
@@ -352,6 +372,19 @@ def create_ai_analysis(
     db.add(row)
     db.flush()
     result = ai_provider.complete(pack)
+    db.add(
+        AiCallLog(
+            created_at=utcnow(),
+            provider=str(result.get("provider") or ""),
+            model=str(result.get("model") or ""),
+            ok=bool(result.get("ok")),
+            live_verified=bool(result.get("ok") and result.get("live_verified")),
+            request_id=result.get("request_id"),
+            latency_ms=result.get("latency_ms"),
+            error=result.get("error"),
+            note=str(result.get("message") or result.get("note") or "")[:500],
+        )
+    )
     if not result.get("ok"):
         row.status = "rejected" if False else "needs_correction"
         row.provider = str(result.get("provider") or "")
@@ -477,8 +510,10 @@ def review_analysis(
     row = db.get(AnalysisRecord, analysis_id)
     if row is None:
         return {"error": "not_found", "message": "分析不存在"}
-    if row.status in TERMINAL and action != "reject":
-        return {"error": "terminal", "message": "已确认或已驳回的记录不能覆盖。请重新生成新记录。", "record": _record_payload(db, row)}
+    if row.status == "confirmed":
+        return {"error": "terminal", "message": "已确认记录不能被普通驳回或再次确认覆盖。请生成新记录。", "record": _record_payload(db, row)}
+    if row.status == "rejected" and action != "save_draft":
+        return {"error": "terminal", "message": "已驳回记录不能覆盖。请重新生成新记录。", "record": _record_payload(db, row)}
     current = db.get(AnalysisRevision, row.current_revision_id) if row.current_revision_id else None
     if current is None or current.id != expected_revision_id:
         return {"error": "revision_mismatch", "message": "确认必须针对当前修订版本。", "record": _record_payload(db, row)}
@@ -517,6 +552,7 @@ def review_analysis(
         db.flush()
         row.current_revision_id = revision.id
         current = revision
+        db.flush()
         if not validation.get("confirmable"):
             row.status = "needs_correction"
             row.updated_at = utcnow()
@@ -541,6 +577,19 @@ def review_analysis(
         if row.status not in CONFIRMABLE and not (action == "edit_confirm" and current.source == "human_edit"):
             if row.status != "pending_review":
                 return {"error": "illegal_transition", "message": "只有待审核且通过核验的版本可以确认。", "record": _record_payload(db, row)}
+        result = db.execute(
+            update(AnalysisRecord)
+            .where(
+                AnalysisRecord.id == row.id,
+                AnalysisRecord.status.in_(tuple(CONFIRMABLE) + ("needs_correction",)),
+                AnalysisRecord.current_revision_id == current.id,
+                AnalysisRecord.snapshot_hash == snapshot_hash,
+            )
+            .values(status="confirmed", confirmed_revision_id=current.id, updated_at=utcnow())
+        )
+        if result.rowcount != 1:
+            db.rollback()
+            return {"error": "concurrent", "message": "并发提交：当前状态、版本或快照已变化，本次确认被拒绝。"}
         row.status = "confirmed"
         row.confirmed_revision_id = current.id
         row.updated_at = utcnow()
@@ -609,6 +658,7 @@ def export_analysis(db: Session, analysis_id: str) -> dict[str, Any]:
     return {
         "analysis_id": analysis_id,
         "official": official,
+        "watermark": None if official else "DRAFT · 未审核草稿，不得作为正式报告",
         "review_required_banner": None if official else "未审核草稿，不得作为正式报告。",
         "source_note": payload.get("source_note"),
         "identity_note": payload.get("identity_note"),
